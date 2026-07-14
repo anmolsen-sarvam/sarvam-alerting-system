@@ -1,0 +1,9 @@
+# Cron alternative to the systemd timer. Install with: crontab -e
+#
+# Runs a single scan pass every 30 minutes. The `set -a; . .env` loads secrets
+# from the repo's .env file into the environment for that invocation.
+#
+# Adjust REPO to the checkout path on the VM.
+
+# REPO=$HOME/sarvam-alerting-system
+*/30 * * * * cd "$HOME/sarvam-alerting-system" && set -a && . ./.env && set +a && ./.venv/bin/sarvam-alerting watch --once >> "$HOME/.sarvam-alerting/cron.log" 2>&1

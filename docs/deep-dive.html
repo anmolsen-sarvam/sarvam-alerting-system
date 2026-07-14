@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sarvam Alerting — First-Principles Deep Dive</title>
+<style>
+  :root{
+    --bg:#0f1116; --panel:#161922; --ink:#e6e8ee; --muted:#9aa3b2;
+    --accent:#7cc4ff; --good:#66d19e; --warn:#f5c451; --crit:#ff6b6b; --line:#252a36;
+    --code:#0b0d12;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:70ch;margin:0 auto;padding:48px 22px 120px;}
+  h1{font-size:30px;line-height:1.2;margin:0 0 6px}
+  h2{font-size:23px;margin:52px 0 8px;padding-top:14px;border-top:1px solid var(--line)}
+  h3{font-size:18px;margin:28px 0 6px;color:var(--accent)}
+  p,li{color:var(--ink)}
+  .meta{color:var(--muted);font-size:14px;margin-bottom:8px}
+  .lede{color:var(--muted);font-size:17px}
+  code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:13.5px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#d7e0ff}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:14px;
+    overflow:auto;font-size:13px;line-height:1.5}
+  .callout{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+    padding:12px 16px;border-radius:8px;margin:16px 0}
+  .why{border-left-color:var(--good)}
+  .gotcha{border-left-color:var(--crit)}
+  .key{border-left-color:var(--warn)}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:1px 9px;margin-right:6px}
+  .muted{color:var(--muted)}
+  ul{padding-left:22px}
+  .toc{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+  .toc a{color:var(--accent);text-decoration:none}
+  .toc ol{margin:6px 0;padding-left:20px}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:var(--panel);color:var(--muted);font-weight:600}
+  .ascii{white-space:pre;font-family:ui-monospace,monospace;font-size:12.5px;color:#cdd6e6}
+  b,strong{color:#fff}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="meta">Personal deep-dive · written for you · grounded in <code>~/sarvam-alerting-system</code> · Jul 2026</div>
+<h1>Sarvam Alerting, from first principles</h1>
+<p class="lede">You vibe-coded this over many sessions. This document rebuilds the whole thing in your head from zero — not "what the files are," but <em>why every decision is the way it is</em>, and the traps we hit. Read top to bottom; each section assumes the previous one.</p>
+
+<div class="toc">
+<b>Map</b>
+<ol>
+<li><a href="#p1">The problem as physics</a></li>
+<li><a href="#p2">The domain model from zero</a></li>
+<li><a href="#p3">Where truth lives (and the encryption wall)</a></li>
+<li><a href="#p4">The one idea the whole system rests on</a></li>
+<li><a href="#p5">The pipeline shape</a></li>
+<li><a href="#p6">Every detector, and why it exists</a></li>
+<li><a href="#p7">Alerts vs reports: two streams</a></li>
+<li><a href="#p8">The LLM saga (a lesson in verifying)</a></li>
+<li><a href="#p9">Delivery, dedupe, and ephemerality</a></li>
+<li><a href="#p10">Deployment: why Airflow changes the design</a></li>
+<li><a href="#p11">Hard-won lessons</a></li>
+<li><a href="#p12">How to extend it without fear</a></li>
+<li><a href="#p13">Glossary + file map</a></li>
+</ol>
+</div>
+
+<h2 id="p1">1 · The problem as physics</h2>
+<p>Strip away the product. The underlying situation is: <b>a machine makes thousands of near-identical decisions per hour, and a single upstream mistake corrupts all of them silently.</b></p>
+<p>A campaign dials thousands of people. Each call pulls that person's data (name, EMI, due date) and speaks it. If the <em>mapping</em> from the uploaded list to the agent breaks, the agent doesn't crash — it just uses a <b>default</b> value for everyone. Every call still "succeeds." The dashboards still look normal. The only symptom is semantic: the agent says "am I speaking with &lt;the same default name&gt;?" on every call.</p>
+<div class="callout why"><span class="tag">why it's hard</span> Nothing errors. There's no exception, no 500, no failed job. The failure is <b>invisible to conventional monitoring</b> because it lives in the <em>content</em>, not the <em>status</em>. That's why a human had to randomly eyeball Metabase to find it — and why it ran for 3–4 days.</p>
+<p>So "catching it" requires monitoring a different thing than uptime: you must watch the <b>distribution of the data flowing through</b>, and notice when it deviates from what "healthy" looks like. That reframing — <i>monitor the data, not the process</i> — is the seed of the entire system.</p>
+
+<h2 id="p2">2 · The domain model from zero</h2>
+<p>Five nouns, nested. Hold these and everything else clicks:</p>
+<table>
+<tr><th>Noun</th><th>What it really is</th></tr>
+<tr><td><b>Org</b></td><td>A client tenant (<code>tatacapital-housing.com</code>). Everything is scoped by <code>org_id</code>. Multi-tenant from day one.</td></tr>
+<tr><td><b>App / agent</b></td><td>The AI that talks. Has <code>app_id</code> + <code>app_version</code>. The "program" being run.</td></tr>
+<tr><td><b>Campaign</b></td><td>A scheduled dialing job: this list, this agent, these hours, this retry policy. Has a status lifecycle: scheduled → active → ended.</td></tr>
+<tr><td><b>Cohort</b></td><td>The uploaded contact list (CSV). Validated into <code>total / valid / rejected</code> records. The <b>data source</b> for per-call variables.</td></tr>
+<tr><td><b>Agent variables</b></td><td>The per-call values (<code>customer_name</code>, <code>emi_amount</code>, <code>due_date</code>). Some are <b>per-contact</b> (differ every call); some are <b>campaign config</b> (same for everyone: <code>bot_name</code>, <code>gst_rate</code>).</td></tr>
+</table>
+<div class="callout key"><span class="tag">the crux</span> The bug lives in the seam between <b>cohort</b> and <b>agent variables</b>: a <code>cohort_transformation</code> maps CSV columns → variables. When that mapping silently fails, the per-contact variable falls back to a <b>default</b>, and the collapse begins. Every detector is, in some sense, watching that seam.</p></div>
+
+<h2 id="p3">3 · Where truth lives (and the encryption wall)</h2>
+<p>All data is reached through <b>Metabase's REST API</b> (native SQL). We picked Metabase's API key deliberately: it works <b>headless</b> — from a VM or a Kubernetes pod, no browser, no login. (The alternative, the <code>samvaad</code> shell helper, scrapes a cookie from a running Chrome — laptop-bound, useless on a server. That's why we never used it.)</p>
+<table>
+<tr><th>Store</th><th>Engine</th><th>Holds</th><th>Used for</th></tr>
+<tr><td>DB 13 <code>EngagementFacts</code></td><td>ClickHouse</td><td>one row per call: connectivity, completion, durations, <code>on_start/on_end_agent_variables</code> (Maps)</td><td>detectors, cycle report</td></tr>
+<tr><td>DB 6 scheduling</td><td>Postgres</td><td><code>campaigns</code>, <code>cohorts</code>, <code>cohort_transformations</code></td><td>discovery, run summary, required-var hints</td></tr>
+<tr><td>DB 10 <code>insights_result</code></td><td>Postgres</td><td>per-call eval metrics: hallucination, loop_detection, call_effectiveness…</td><td>weekly evals, quality detectors</td></tr>
+</table>
+<div class="callout gotcha"><span class="tag">the wall you must remember</span> <b>Transcript text is encrypted at rest.</b> Both <code>InteractionMessages.content</code> and <code>EngagementFacts.on_end_interaction_transcript</code> are base64 of <code>&lt;keyid&gt;|||&lt;org&gt;|||&lt;AES ciphertext&gt;</code>. Structured fields (variables, dispositions, metrics) are plaintext; <b>the words spoken are not.</b> This single fact decides what's possible: anything needing to <em>read the conversation</em> is off the table from Metabase. We only learned this by decoding a sample — see §8.</p></div>
+
+<h2 id="p4">4 · The one idea the whole system rests on</h2>
+<p>The naive detector is "a variable with the same value everywhere is a bug." <b>This is wrong</b>, and the data proves it: <code>bot_name</code>=नेहा, <code>gst_rate</code>=18, <code>campaign_code</code>=CMP0526 are <em>supposed</em> to be identical across every call. Flagging low cardinality would drown you in false positives.</p>
+<div class="callout why"><span class="tag">the real signal</span> The bug is not "low cardinality." It's <b>a variable that is normally per-contact suddenly collapsing to one value.</b> "Normal" is defined by the campaign's own recent history. So every detector compares a <b>current window</b> (last 6h) against a <b>baseline window</b> (prior 72h) <em>for the same campaign</em> — never against an absolute threshold.</p></div>
+<p>Two independent ways to know a variable "should" be per-contact:</p>
+<ul>
+<li><b>History:</b> in the baseline it had many distinct values (e.g. <code>customer_name</code> had 386,690). If it drops to 1 now → bug.</li>
+<li><b>Intent:</b> the cohort transformation marks it <code>required</code> — it <em>must</em> come from the upload. A required variable that collapses is high-confidence, and this works <b>even on a brand-new campaign with no history yet</b> (the "catch it at launch" case).</li>
+</ul>
+<p>Internalize this and you understand 80% of the codebase. Everything is "current vs baseline, per campaign, with intent hints."</p>
+
+<h2 id="p5">5 · The pipeline shape</h2>
+<div class="callout"><div class="ascii">discover active campaigns   (cheap: scheduling DB)
+        │
+        ▼   for each campaign
+   build a snapshot context ──► run detectors (ClickHouse aggregation)
+        │                              │ findings
+        ▼                              ▼
+   build reports                 dedupe / cooldown (SQLite/S3)
+        │ reports                      │ new findings
+        └──────────► notifiers ◄───────┘
+             console · Slack webhook · Slack bot · Google Sheet</div></div>
+<p>Two design choices worth understanding:</p>
+<ul>
+<li><b>Discovery is cheap on purpose.</b> It lists active campaigns from the small scheduling DB, then does <em>one</em> bounded <code>campaign_id IN (…)</code> count query on the giant facts table. The earlier version scanned the whole facts table grouped by campaign and <b>timed out (504)</b> at the gateway. Lesson: never scan the big table unfiltered.</li>
+<li><b>Detectors are pure-ish functions.</b> Each takes a context (campaign + config + Metabase client) and returns <code>Finding</code>s. They never notify, never touch state. That separation is why you can add one in ~40 lines (see §12).</li>
+</ul>
+
+<h2 id="p6">6 · Every detector, and why it exists</h2>
+<p>All compare current vs baseline unless noted. Severity is CRITICAL or WARNING.</p>
+<table>
+<tr><th>Detector</th><th>Watches</th><th>First-principles reason</th></tr>
+<tr><td><code>variable_collapse</code></td><td>per-contact variable → one value</td><td>the original escalation bug; the priority detector</td></tr>
+<tr><td><code>required_populated</code></td><td>required variable is blank</td><td>"are all Overview columns populated?" — the other failure mode (empty, not defaulted)</td></tr>
+<tr><td><code>expected_values</code></td><td>variable value ∉ allowed set / cohort size ≠ expected</td><td>value <em>correctness</em> (loan type must be "Digital Personal Loan"); needs CS-provided expectations</td></tr>
+<tr><td><code>connectivity</code></td><td>connected-rate drop / failure-rate ceiling</td><td>dialer/telephony regressions</td></tr>
+<tr><td><code>short_calls</code></td><td>spike in ultra-short connected calls</td><td>proxy for broken script / instant hangups</td></tr>
+<tr><td><code>errors</code></td><td><code>has_log_issues</code> rate</td><td>runtime error surges</td></tr>
+<tr><td><code>disposition_accuracy</code></td><td>insights <code>confidence_disp_accuracy_score</code> &lt; threshold</td><td>agent tagging outcomes wrong; uses Sarvam's own eval, not ours</td></tr>
+<tr><td><code>insights_quality</code></td><td>insights hallucination/loop/escalation/safety rates</td><td>conversation quality <em>without</em> reading (encrypted) transcripts — see §8</td></tr>
+</table>
+<div class="callout why"><span class="tag">the pattern</span> The last two are special: they read the <b>insights pipeline</b> instead of raw data. That's the workaround for the encryption wall — Sarvam already ran LLM evals upstream (with decryption) and stored the <em>results</em> as plaintext numbers. We consume those numbers.</p></div>
+
+<h2 id="p7">7 · Alerts vs reports: two streams</h2>
+<p>Not everything is an alarm. The system has two output <b>streams</b>, and a notifier subscribes to one or both:</p>
+<ul>
+<li><b>alerts</b> — severity findings from detectors, <b>deduped</b> (you get pinged when a problem <em>appears</em>, not every 30 min).</li>
+<li><b>reports</b> — always-posted digests: the <b>run summary</b> (cohorts, rows uploaded vs filtered, retry windows — "what is the automation doing right now"), the <b>cycle report</b> (connectivity/engagement/PTP/disposition funnel), <b>weekly evals</b> (insights quality per campaign), and the <b>client report</b> (per-org markdown deliverable).</li>
+</ul>
+<div class="callout key"><span class="tag">why split</span> Alerts must be rare and actionable (alarm fatigue kills alerting systems). Reports are ambient situational awareness. Mixing them destroys both. The <code>streams</code> concept keeps them apart while sharing the same delivery plumbing.</p></div>
+
+<h2 id="p8">8 · The LLM saga (a lesson in verifying)</h2>
+<p>This is the most instructive arc in the project — keep it as a permanent reminder to <b>verify assumptions against reality</b>.</p>
+<ol>
+<li>We built <b>Layer A</b> (metric-based conversationality: looping/silence/no-closure from plaintext flags) and <b>Layer B</b> (feed transcripts to gpt-4o/mini, score quality + check "was the EMI stated correctly").</li>
+<li>We <b>calibrated</b> mini vs gpt-4o (mini ran ~0.9 pts harsher; picked gpt-4o). Felt rigorous.</li>
+<li>Verifying on real campaigns, every result was suspiciously flat: always <code>early_drop</code>, always "not mentioned."</li>
+<li>We decoded a transcript. It was <b>ciphertext.</b> The LLM had been scoring <code>base64(AES(...))</code> the entire time. The calibration numbers were noise-on-noise.</li>
+</ol>
+<div class="callout gotcha"><span class="tag">the lesson</span> A pipeline can be fully "working" — tests green, calls succeeding, plausible-looking output — and be <b>completely meaningless</b> because an upstream assumption (transcripts are readable) was false. The fix wasn't more code; it was <b>checking the input</b>. Now those features have an <b>encryption guard</b> (detect ciphertext → skip with a clear message) and conversation quality comes from the <code>insights_*</code> tables, which are decrypted upstream.</p></div>
+
+<h2 id="p9">9 · Delivery, dedupe, and ephemerality</h2>
+<ul>
+<li><b>Notifiers</b> implement one interface: <code>console</code> (rich terminal / task logs), <code>slack_webhook</code> (one channel per URL), <code>slack_bot</code> (any channel, <b>per-campaign threads</b>, per-org routing), <code>gsheet</code> (auto-fills the Master QC sheet). Deep links + example <code>interaction_id</code>s ride along so a human jumps alert → evidence.</li>
+<li><b>Dedupe</b> is a SQLite table of finding fingerprints + last-notified time. A finding re-alerts only after <code>cooldown_hours</code>. This is what makes alerts rare.</li>
+</ul>
+<div class="callout gotcha"><span class="tag">ephemerality</span> On Kubernetes each run is a fresh pod — <b>local SQLite doesn't survive.</b> So the scan syncs its dedupe DB <b>to/from S3</b> around each run. Miss this and you'd re-alert every single pass. Ephemerality quietly breaks any "remember across runs" assumption; the fix is always "externalize the state."</p></div>
+
+<h2 id="p10">10 · Deployment: why Airflow changes the design</h2>
+<p>Originally this targeted a VM (systemd timer, long-running <code>watch</code> loop, local state). Then the platform moved to <b>Airflow/Kubernetes</b>, and that migration <em>forced</em> three changes — a good example of how infra shapes code:</p>
+<table>
+<tr><th>VM assumption</th><th>K8s reality</th><th>Consequence</th></tr>
+<tr><td>always-on process</td><td>ephemeral pods per task</td><td>state → S3; jobs → DAGs on cron schedules</td></tr>
+<tr><td>secrets in <code>.env</code></td><td>K8s Secret</td><td>injected via <code>pod_override</code> env, never committed</td></tr>
+<tr><td>local deps</td><td>custom image</td><td>package installed from git into <code>images/samvaad</code>, config baked in</td></tr>
+</table>
+<p>Six DAGs (<code>samvaad_alerting_scan</code> every 30 min + daily/weekly report DAGs) run the exact same library code the CLI runs — the CLI and DAGs are two front-ends over one engine.</p>
+
+<h2 id="p11">11 · Hard-won lessons (the scar tissue)</h2>
+<ul>
+<li><b>504 on wide scans</b> → never <code>GROUP BY</code> the full facts table; always filter by <code>campaign_id IN (…)</code> first. Discovery moved to the small scheduling DB.</li>
+<li><b>Encrypted transcripts</b> → structured data is plaintext, words are not; use the insights pipeline for anything semantic.</li>
+<li><b>"Same value = bug" is false</b> → baseline-relative detection is mandatory (§4).</li>
+<li><b>LLM sampling caught only early-drops</b> → prefer completed/longest calls, or you evaluate hangups.</li>
+<li><b>Insights aren't daily-dense</b> → the eval lookback is 7 days, not 3, or campaigns show no data.</li>
+<li><b>Metabase returns HTTP 202</b> (not 200) on success from <code>/api/dataset</code> — the client accepts both.</li>
+</ul>
+
+<h2 id="p12">12 · How to extend it without fear</h2>
+<p>Adding a detector is a closed, mechanical task — this is the payoff of the pure-function design:</p>
+<pre>1. new file in detectors/, subclass Detector, set name = "my_detector"
+2. run(ctx) -> list[Finding]     # one SQL via ctx.metabase.query(...)
+3. register in detectors/__init__.py DETECTOR_CLASSES
+4. add [detectors.my_detector] to config (enabled + thresholds)
+5. it now runs in every scan; findings flow through dedupe + notifiers free</pre>
+<p>You never touch delivery, dedupe, discovery, or the DAGs. That's the whole point of the seams.</p>
+
+<h2 id="p13">13 · Glossary + file map</h2>
+<table>
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>PTP</td><td>Promise To Pay — collections outcome (<code>on_end_agent_variables['promised_to_pay']</code>)</td></tr>
+<tr><td>disposition</td><td>call outcome label the agent assigns (free-form per org)</td></tr>
+<tr><td>on_start / on_end_agent_variables</td><td>Map(String,String) of the variables a call used at start / end</td></tr>
+<tr><td>baseline vs current window</td><td>the prior 72h vs the last 6h, per campaign</td></tr>
+<tr><td>insights pipeline</td><td>Sarvam's upstream LLM evals, stored plaintext in <code>insights_result</code></td></tr>
+</table>
+<pre>src/sarvam_alerting/
+  config.py      config + secrets (TOML + env)
+  models.py      Severity, Finding, Report, CampaignInfo
+  engine.py      discover → detect → report
+  clients/       metabase (SQL), scheduling, llm, samvaad(stub)
+  detectors/     the 8 detectors (§6)
+  reports/       run_summary, cycle_report, weekly_evals, client_report, +LLM(guarded)
+  notify/        console, slack_webhook, slack_bot, gsheet, streams
+  state.py       SQLite dedupe (S3-synced on K8s)
+  cli.py         check / watch / run-summary / cycle-report / … 
+airflow/         DAGs + custom image + deploy README
+verification/    live per-campaign proof reports</pre>
+
+<div class="callout key" style="margin-top:40px"><span class="tag">the whole thing in one sentence</span> <b>Pull each live campaign's structured call data from Metabase, compare every variable and metric to that campaign's own recent history (never an absolute threshold), alert on collapses and spikes while staying quiet otherwise, and lean on the upstream insights pipeline for anything that requires reading the (encrypted) conversation.</b></div>
+
+</div>
+</body>
+</html>

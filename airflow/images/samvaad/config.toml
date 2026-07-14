@@ -1,0 +1,184 @@
+# Baked into the samvaad Airflow image at /opt/sarvam-alerting/config.toml.
+# SECRET-FREE. Secrets are injected at runtime from the samvaad-alerting-secrets K8s secret.
+
+[metabase]
+base_url = "https://metabase.sarvam.ai/api"
+database_id = 13
+schema = "sarvam-app-analytics-db"
+facts_table = "EngagementFacts"
+api_key_env = "METABASE_API_KEY"
+timeout_seconds = 90
+scheduling_database_id = 6
+scheduling_schema = "public"
+evals_database_id = 10
+evals_schema = "public"
+
+[windows]
+current_hours = 6
+baseline_hours = 72
+
+[discovery]
+source = "scheduling"               # cheap active-campaign lookup; avoids facts-scan 504s
+statuses = ["active", "running"]
+min_calls = 500                     # facts source only
+exclude = ["NO_CAMPAIGN_ID", ""]
+only = []
+# Scope which orgs/campaigns to monitor (empty = everything):
+only_orgs = []                      # e.g. ["chola.com", "tatacapital"] to onboard gradually
+exclude_orgs = []
+include_patterns = []               # e.g. ["PAPQ", "HLBT"]
+exclude_patterns = ["test", "demo"] # drop obvious test/experiment campaigns by default
+
+[detectors.variable_collapse]
+enabled = true
+min_calls = 50
+per_contact_min_distinct = 15
+per_contact_min_ratio = 0.05
+collapse_max_distinct = 1
+use_required_hints = true
+
+[detectors.required_populated]
+enabled = true
+min_calls = 100
+blank_rate_alert = 0.1
+max_vars = 40
+
+[detectors.disposition_accuracy]
+enabled = true
+metric_name = "confidence_disp_accuracy_score"
+lookback_days = 7
+min_evals = 20
+min_score = 6.0
+
+[detectors.insights_quality]
+enabled = true                 # conversation-quality/safety from insights (transcripts are encrypted)
+lookback_days = 7
+min_evals = 20
+[detectors.insights_quality.thresholds]
+hallucination = 0.05
+loop_detection = 0.30
+escalation_miss = 0.15
+data_exfiltration = 0.01
+harassing_language = 0.02
+third_party_disclosure = 0.02
+
+[detectors.conversationality]
+enabled = true
+min_calls = 100
+loop_rate_abs = 0.05
+loop_rate_mult = 2.0
+silence_seconds = 8.0
+silence_rate_abs = 0.15
+silence_rate_mult = 1.75
+nocls_min_messages = 15
+nocls_rate_abs = 0.2
+nocls_rate_mult = 1.75
+
+[detectors.expected_values]
+enabled = true
+# CS-team [[expected]] rules go here (loan types, cohort sizes). Empty = no-op for now.
+
+[detectors.connectivity]
+enabled = true
+min_calls = 200
+connected_drop_ratio = 0.4
+failed_spike_mult = 1.75
+failed_rate_min = 0.25
+
+[detectors.short_calls]
+enabled = true
+min_calls = 100
+short_duration_seconds = 10.0
+short_share_warn = 0.5
+short_share_mult = 1.75
+
+[detectors.errors]
+enabled = true
+min_calls = 100
+log_issue_rate_abs = 0.1
+log_issue_rate_mult = 2.0
+
+[state]
+# Ephemeral pod path; the scan DAG syncs this to/from S3 (SARVAM_ALERTING_STATE_S3).
+path = "/tmp/sarvam-alerting/state.db"
+cooldown_hours = 6
+
+[reports.run_summary]
+enabled = true            # posted by the 30-min scan DAG
+lookback_hours = 24
+statuses = ["active", "scheduled", "running"]
+max_campaigns_per_org = 15
+
+[reports.cycle_report]
+enabled = false           # posted only by the daily samvaad_cycle_report DAG (direct call)
+lookback_hours = 24
+engaged_min_messages = 2
+max_campaigns = 25
+max_dispositions = 6
+
+[reports.weekly_evals]
+enabled = true            # posted by the weekly samvaad_weekly_evals DAG
+days = 7
+min_interactions = 20
+max_campaigns = 15
+bool_metrics = ["hallucination", "loop_detection", "escalation_miss", "data_exfiltration", "harassing_language", "third_party_disclosure"]
+score_metrics = ["call_effectiveness", "confidence_disp_accuracy_score"]
+
+# Transcripts are ENCRYPTED in Metabase -> LLM-on-transcript reports disabled.
+# Conversation quality comes from [detectors.insights_quality] + [reports.weekly_evals].
+[reports.conversationality_review]
+enabled = false
+lookback_hours = 24
+sample_size = 10
+max_campaigns = 5
+min_messages = 6
+alert_below_score = 3.0
+
+[reports.client_report]
+# Writes markdown locally then uploads to S3 (pods are ephemeral). Set s3_prefix and flip
+# enabled = true to run the weekly samvaad_client_report DAG.
+enabled = false
+days = 7
+output_dir = "/tmp/client-reports"
+# s3_prefix = "s3://sarvam-samvaad/client-reports"
+
+[reports.value_correctness]
+enabled = false           # transcripts encrypted; re-enable only with a decrypted source
+lookback_hours = 24
+sample_size = 10
+max_campaigns = 5
+min_messages = 6
+check_variables = ["EMI_amount", "due_date", "total_due"]
+incorrect_rate_alert = 0.15
+min_checked = 5
+
+[links]
+# Fill with your real Metabase dashboard + call URLs to get one-click evidence in alerts:
+# campaign_dashboard_url_template = "https://metabase.sarvam.ai/dashboard/<ID>?campaign_id={campaign_id}"
+# call_url_template = "https://agents.sarvam.ai/interactions/{interaction_id}"
+
+[llm]
+enabled = true
+name = "gpt-4o"
+url = "https://azure-openai-deployment-agents.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview"
+api_key_env = "AZURE_OPENAI_API_KEY"
+timeout_seconds = 60
+[llm.fallback]
+name = "gpt-4.1-mini"
+url = "https://azure-openai-deployment-agents.openai.azure.com/openai/deployments/gpt-4.1-mini/chat/completions?api-version=2025-01-01-preview"
+api_key_env = "AZURE_OPENAI_API_KEY"
+
+# ---- Notifiers ----
+# console -> Airflow task logs (great for debugging). slack_bot -> real delivery.
+[[notify]]
+type = "console"
+min_severity = "info"
+streams = ["alerts", "reports"]
+
+[[notify]]
+type = "slack_bot"
+min_severity = "warning"
+streams = ["alerts", "reports"]
+token_env = "SLACK_BOT_TOKEN"
+default_channel = "#samvaad-alerts"
+report_channel = "#automation-alerts"

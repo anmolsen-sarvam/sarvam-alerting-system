@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# Local secrets & state
+.env
+*.local.toml
+# local working config (commit config.example.toml only)
+config/config.toml
+state.db
+scope.json
+.sarvam-alerting/
+
+# Local editor/tooling config that may contain secrets
+.cursor/
+.vscode/
+.idea/
+.DS_Store
+
+# Generated artifacts that contain LIVE client data — do not publish
+client-reports/
+verification/

@@ -1,0 +1,253 @@
+# Sarvam alerting configuration.
+# Copy to config/config.toml and adjust. Secrets come from environment (see .env.example).
+
+[metabase]
+base_url = "https://metabase.sarvam.ai/api"
+database_id = 13                       # SamvaadClickhouseReadReplica (call facts)
+schema = "sarvam-app-analytics-db"
+facts_table = "EngagementFacts"
+api_key_env = "METABASE_API_KEY"
+timeout_seconds = 90
+scheduling_database_id = 6             # Scheduling Service DB (campaigns/cohorts, Postgres)
+scheduling_schema = "public"
+evals_database_id = 10                 # agent-evals DB (post-call eval results, Postgres)
+evals_schema = "public"
+
+[windows]
+# "current" = the recent slice we evaluate; "baseline" = the healthy history we compare against.
+current_hours = 6
+baseline_hours = 72
+
+[discovery]
+# "scheduling" (default): list active campaigns from the small scheduling DB -- cheap, and
+#   picks up brand-new campaigns immediately (the launch-check case). Avoids the gateway
+#   504s that the full-table facts scan hits.
+# "facts": scan EngagementFacts for campaigns with >= min_calls in the current window.
+source = "scheduling"
+statuses = ["active", "running"]   # scheduling source: which campaign statuses count as active
+min_calls = 500                     # facts source only
+exclude = ["NO_CAMPAIGN_ID", ""]
+# Optional allowlist; empty means "all discovered campaigns".
+only = []
+
+# ---- Scope which orgs / campaigns to monitor (empty = everything) ----
+# only_orgs: monitor ONLY these orgs (substring match on org_id). e.g. onboard client-by-client.
+only_orgs = []            # e.g. ["tatacapital", "chola.com"]
+exclude_orgs = []         # e.g. ["test", "internal"]
+# Within the selected orgs, scope by campaign_id substring:
+include_patterns = []     # e.g. ["PAPQ", "HLBT"] -> only those campaign types
+exclude_patterns = []     # e.g. ["test", "demo", "cug"] -> drop test/experiment campaigns
+
+[detectors.variable_collapse]
+enabled = true
+min_calls = 50                 # need at least this many current calls to judge a variable
+per_contact_min_distinct = 15  # baseline var counts as "per-contact" if it had >= this many distinct values
+per_contact_min_ratio = 0.05   # ...or distinct/calls >= this in baseline
+collapse_max_distinct = 1      # current considered "collapsed" if distinct values <= this
+use_required_hints = true      # consult cohort_transformations: a `required` var that collapsed is high-confidence
+                               # (also lets brand-new campaigns be caught before a baseline exists)
+
+[detectors.connectivity]
+enabled = true                 # both signals are baseline-relative (absolute rates are
+                               # meaningless for cold outbound: 85-90% no-answer is normal)
+min_calls = 200
+connected_drop_ratio = 0.4     # alert if connected-rate drops >= 40% vs baseline
+failed_spike_mult = 1.75       # alert if dialer-failure (v2v='failed') rate >= baseline * this ...
+failed_rate_min = 0.25         # ...and >= this absolute floor
+
+[detectors.short_calls]
+enabled = true
+min_calls = 100
+short_duration_seconds = 10.0
+short_share_warn = 0.5         # warn if >= this share of connected calls are ultra-short
+short_share_mult = 1.75        # ...and current short-share >= baseline * this
+
+[detectors.errors]
+enabled = true
+min_calls = 100
+log_issue_rate_abs = 0.1       # alert if >= this share of calls have log issues
+log_issue_rate_mult = 2.0      # ...and current rate >= baseline * this
+
+[detectors.required_populated]
+enabled = true                 # required cohort variables that are blank ("columns not populated")
+min_calls = 100
+blank_rate_alert = 0.1         # alert if a required var is blank in >= this share of calls
+max_vars = 40
+
+[detectors.disposition_accuracy]
+enabled = true                 # uses the insights confidence_disp_accuracy_score (0-10)
+metric_name = "confidence_disp_accuracy_score"
+lookback_days = 7
+min_evals = 20
+min_score = 6.0                # alert if avg disposition-accuracy < this
+
+[detectors.insights_quality]
+enabled = true                 # conversation-quality/safety from the insights pipeline (transcripts are
+                               # encrypted in Metabase, so this replaces LLM-on-transcript for real signal)
+lookback_days = 7
+min_evals = 20
+[detectors.insights_quality.thresholds]   # metric -> alert if flagged-rate >= this
+hallucination = 0.05
+loop_detection = 0.30
+escalation_miss = 0.15
+data_exfiltration = 0.01
+harassing_language = 0.02
+third_party_disclosure = 0.02
+
+[detectors.conversationality]
+enabled = true                 # Layer A conversationality (no LLM): looping / silences / no-closure
+min_calls = 100
+loop_rate_abs = 0.05           # alert if >= this share of connected calls looped ...
+loop_rate_mult = 2.0           # ...and >= baseline * this
+silence_seconds = 8.0          # avg agent response time above this = "long silence"
+silence_rate_abs = 0.15
+silence_rate_mult = 1.75
+nocls_min_messages = 15        # a long call that ended with NO_END_REASON = "not closing"
+nocls_rate_abs = 0.2
+nocls_rate_mult = 1.75
+
+[detectors.expected_values]
+enabled = true                 # runs the [[expected]] rules below (no rules = no-op)
+
+# ---- Expected-value / cohort-size rules (CS-team inputs go here) ----
+# Each [[expected]] rule targets campaigns via any of:
+#   match_campaign_contains  (substring of campaign_id)
+#   match_org_id             (exact org id)
+#   match_app_contains       (substring of app_id)
+# ...then asserts ONE of:
+#   variable + allowed [+ min_share]   -> flag if calls use values outside `allowed`
+#   cohort_size [+ cohort_tolerance_pct] -> flag if uploaded cohort size deviates
+#
+# Examples (uncomment and adapt with real values from CS/client):
+#
+# [[expected]]
+# name = "Chola D2C loan type"
+# match_campaign_contains = "D2C"
+# variable = "loan_type"
+# allowed = ["Digital Personal Loan"]
+# min_share = 0.02             # flag if >2% of calls use a disallowed value
+#
+# [[expected]]
+# name = "Chola Samsung loan type"
+# match_campaign_contains = "Samsung"
+# variable = "loan_type"
+# allowed = ["Samsung Mobile Loan"]
+#
+# [[expected]]
+# name = "Chola cohort size (client shared ~50k)"
+# match_campaign_contains = "CH"
+# cohort_size = 50000
+# cohort_tolerance_pct = 25
+
+[state]
+path = "~/.sarvam-alerting/state.db"
+cooldown_hours = 6             # don't re-alert the same finding within this window
+
+# ---- Reports (always-posted digests, delivered to notifiers with "reports" in streams) ----
+
+[reports.run_summary]
+enabled = true                 # post after each run: cohorts, rows uploaded/filtered, campaign IDs, retry windows
+lookback_hours = 24            # also include campaigns updated within this window
+statuses = ["active", "scheduled", "running"]
+max_campaigns_per_org = 15
+
+[reports.cycle_report]
+enabled = false                # post-cycle performance (connectivity/engagement/PTP/dispositions); enable on a daily timer
+lookback_hours = 24
+engaged_min_messages = 2       # a connected call counts as "engaged" at >= this many messages
+max_campaigns = 25
+max_dispositions = 6           # show the top-N disposition values per campaign
+
+[reports.weekly_evals]
+enabled = false                # weekly client deliverable; run on a weekly timer
+days = 7
+min_interactions = 20          # only report campaigns with at least this many evaluated calls
+max_campaigns = 15
+# Reads the live insights pipeline (insights_result, keyed by campaign_id). Boolean metrics
+# are reported as rates, integer metrics as averages. Adjust to your enabled metrics:
+bool_metrics = ["hallucination", "loop_detection", "escalation_miss", "data_exfiltration", "harassing_language", "third_party_disclosure"]
+score_metrics = ["call_effectiveness", "confidence_disp_accuracy_score"]
+
+[reports.conversationality_review]
+enabled = false                # Layer B: LLM transcript scoring (run on a daily timer, not every scan)
+lookback_hours = 24
+sample_size = 10               # transcripts scored per campaign (matches manual QC cadence)
+max_campaigns = 5
+min_messages = 6               # only score substantive calls (avoids penalising early drops)
+prefer_completed = true        # sample completed / longest calls first (real conversations, not drops)
+alert_below_score = 3.0        # raise an alert if a campaign's avg score drops below this (1-5)
+
+[reports.client_report]
+enabled = false                # weekly per-use-case (per-org) client deliverable (markdown files)
+days = 7
+output_dir = "client-reports"
+# Optional: upload each report to S3 (needed on Airflow, whose pods are ephemeral):
+# s3_prefix = "s3://sarvam-samvaad/client-reports"
+
+[reports.value_correctness]
+enabled = false                # LLM: are key values (EMI/date/amount) stated correctly in the call?
+lookback_hours = 24
+sample_size = 10
+max_campaigns = 5
+min_messages = 6
+prefer_completed = true        # sample completed / longest calls first (so values are actually reached)
+check_variables = ["EMI_amount", "due_date", "total_due"]   # per-use-case; set to your critical vars
+incorrect_rate_alert = 0.15    # alert if >= this share of checked calls stated a wrong value
+min_checked = 5
+
+# ---- Deep links + evidence (optional; fill with your real Metabase dashboard / call URLs) ----
+[links]
+# campaign_dashboard_url_template = "https://metabase.sarvam.ai/dashboard/<ID>?campaign_id={campaign_id}"
+# call_url_template = "https://agents.sarvam.ai/interactions/{interaction_id}"
+
+# ---- LLM (for the conversationality review). Any Azure deployment works. ----
+# Calibration (15 Chola calls) showed gpt-4.1-mini scores ~0.9 pts harsher than gpt-4o and
+# disagrees on flow ~1/3 of the time, so gpt-4o is the primary scorer. gpt-4.1-mini is a
+# cheaper alternative; gpt-5 is also deployed (client auto-adapts its params) if you want
+# the strongest judge.
+[llm]
+enabled = true
+name = "gpt-4o"
+url = "https://azure-openai-deployment-agents.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview"
+api_key_env = "AZURE_OPENAI_API_KEY"
+timeout_seconds = 60
+[llm.fallback]
+name = "gpt-4.1-mini"
+url = "https://azure-openai-deployment-agents.openai.azure.com/openai/deployments/gpt-4.1-mini/chat/completions?api-version=2025-01-01-preview"
+api_key_env = "AZURE_OPENAI_API_KEY"
+
+# ---- Notifiers (evaluated in order). At least one recommended. ----
+# Each block:
+#   type         = console | slack_webhook | slack_bot
+#   min_severity = info | warning | critical      (applies to the "alerts" stream)
+#   streams      = ["alerts"] and/or ["reports"]  (default ["alerts"])
+
+[[notify]]
+type = "console"
+min_severity = "info"
+streams = ["alerts", "reports"]
+
+# --- Slack webhook: one URL per channel. Point one at your automation-alerts channel for reports. ---
+# [[notify]]
+# type = "slack_webhook"
+# min_severity = "warning"
+# streams = ["alerts"]
+# url_env = "SLACK_WEBHOOK_URL"
+#
+# [[notify]]
+# type = "slack_webhook"
+# streams = ["reports"]
+# url_env = "SLACK_AUTOMATION_WEBHOOK_URL"
+
+# --- Slack bot: one token, routes alerts per org/campaign and reports to a dedicated channel. ---
+# [[notify]]
+# type = "slack_bot"
+# min_severity = "warning"
+# streams = ["alerts", "reports"]
+# token_env = "SLACK_BOT_TOKEN"
+# default_channel = "#campaign-alerts"
+# report_channel = "#automation-alerts"     # run summary + cycle reports land here
+# [notify.org_channels]                       # optional per-org alert routing
+# "tatacapital-housing.com" = "#tatacap-alerts"
+# [notify.channels]                           # optional per-campaign alert routing
+# "VFD-PAPQ-32d48eab-6c68" = "#chola-tracking"

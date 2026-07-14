@@ -1,0 +1,13 @@
+[project]
+name = "airflow-samvaad"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    # The alerting package itself (pulls in httpx / typer / rich transitively).
+    # Point this at wherever this repo is pushed; pin to a tag/commit for reproducibility.
+    "sarvam-alerting @ git+https://github.com/sarvamai/sarvam-alerting-system.git@main",
+    # S3-backed dedupe state for the 30-min scan (ephemeral pods).
+    "boto3>=1.34",
+    # Only needed if the Master-QC-sheet (gsheet) notifier is enabled.
+    "gspread>=6.1",
+]

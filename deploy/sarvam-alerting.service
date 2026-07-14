@@ -1,0 +1,22 @@
+# DEPRECATED: the VM is being retired in favour of Airflow/Kubernetes.
+# Use airflow/ (DAGs) for production. This file is kept for reference/local use only.
+#
+# systemd oneshot unit -- runs a single scan pass. Paired with the .timer.
+# Install (as the service user, not root):
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/sarvam-alerting.service deploy/sarvam-alerting.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sarvam-alerting.timer
+# (Run `loginctl enable-linger $USER` so it runs while you're logged out.)
+
+[Unit]
+Description=Sarvam campaign alerting scan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust WorkingDirectory to wherever you checked out the repo on the VM:
+WorkingDirectory=%h/sarvam-alerting-system
+EnvironmentFile=%h/sarvam-alerting-system/.env
+ExecStart=%h/sarvam-alerting-system/.venv/bin/sarvam-alerting watch --once
