@@ -110,18 +110,6 @@ bundle — DAGs, custom image, K8s-secret wiring — is in [`airflow/`](airflow/
 CLI remains for local/ad-hoc runs. (The old VM `systemd`/`cron` files in `deploy/` are
 deprecated, kept for reference.)
 
-## Documentation
-
-| Doc | For |
-|---|---|
-| [`docs/high-level-review.md`](docs/high-level-review.md) | the big picture, in plain terms |
-| [`docs/low-level-review.md`](docs/low-level-review.md) | the mechanics, for engineers |
-| [`docs/cs-qc-guide.md`](docs/cs-qc-guide.md) | how CS/QC/FDSE use it day-to-day |
-| [`docs/pm-brief.md`](docs/pm-brief.md) | personas, rollout, metrics, roadmap |
-| [`docs/scope-control.md`](docs/scope-control.md) | controlling scope from Slack |
-| [`docs/deep-dive.html`](docs/deep-dive.html) | first-principles deep dive |
-| [`OVERVIEW.md`](OVERVIEW.md) | end-to-end system overview |
-
 ## Project layout
 
 ```
