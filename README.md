@@ -26,6 +26,8 @@ constant (bot name, GST rate) never false-positive.
 | Detector | Catches |
 |---|---|
 | `variable_collapse` | the default-variable bug — a per-contact variable collapsing to one value |
+| `value_sanity` | placeholder / un-rendered-template (`{{name}}`) / implausible variable values (rules + optional LLM) |
+| `stalled_campaign` | a campaign active with a cohort uploaded but (almost) no calls — dialing stalled |
 | `required_populated` | a required cohort column arriving blank ("Overview column not populated") |
 | `expected_values` | wrong loan type / mismapped value / cohort size ≠ what the client sent |
 | `connectivity` | connected-rate drop or dialer-failure spike (baseline-relative) |
@@ -77,6 +79,9 @@ uv run sarvam-alerting run-summary             # post the automation digest
 uv run sarvam-alerting cycle-report            # post per-campaign performance
 uv run sarvam-alerting weekly-evals            # post the weekly insights digest
 uv run sarvam-alerting client-report           # write per-org client reports
+uv run sarvam-alerting owners list             # view engagement owners (who gets paged)
+uv run sarvam-alerting owners add chola.com U0ANMOL   # add owner (dotted key => org)
+uv run sarvam-alerting owners remove chola.com U0ANMOL # remove owner (omit id = whole key)
 uv run sarvam-alerting test-notify             # verify notifier wiring
 uv run sarvam-alerting watch --once            # a single scheduled pass (for cron/Airflow)
 ```
@@ -92,16 +97,33 @@ Highlights:
   / `exclude_patterns`) so you monitor specific clients/campaigns, not all 30+ orgs.
 - `[detectors.*]` — per-detector thresholds.
 - `[[expected]]` — CS-owned rules: allowed loan types, expected cohort sizes.
+- `[owners]` — map org/campaign → Slack ids to `@`-mention the engagement owner on alerts.
 - `[[notify]]` — `console` / `slack_webhook` / `slack_bot` / `gsheet`, each with `streams`
   (`alerts` and/or `reports`).
-- `[llm]` — Azure model for the (optional, encryption-guarded) transcript checks.
+- `[llm]` — Azure model used by `value_sanity`'s optional adjudication and the
+  (encryption-guarded) transcript checks.
 
-### Slack + scope control
+### Slack (the control plane)
 - **Alerts/reports** post via an incoming webhook (`SLACK_WEBHOOK_URL`) or a bot token
   (any channel, per-campaign threads, per-org routing).
-- **CS/QC control the scope from Slack** — `@alerts monitor chola.com`, `include PAPQ`,
-  `exclude test`, `scope`, `reset` — via an always-on Socket Mode service
-  (`sarvam-alerting control-server`). See [`docs/scope-control.md`](docs/scope-control.md).
+- **Engagement-owner tagging** — critical alerts `@`-mention the person who owns that client
+  (severity-gated to stay low-noise). Turns an alert into a direct page, not just a post.
+- **CS/QC run it as a two-way console from Slack — no file edits.** An always-on Socket Mode
+  service (`sarvam-alerting control-server`) reads/writes a shared store and answers live
+  queries; every scan reads the store on its next pass:
+  - **scope** — `monitor chola.com` · `include PAPQ` · `exclude test` · `scope` · `reset`
+  - **owners** — `owner chola.com @you` · `owner-min critical` · `owners`
+  - **expected values** — `expect D2C loan_type = Digital Personal Loan | Samsung Mobile Loan`
+    · `expect JUNE cohort 50000` · `expected`
+  - **mutes** — `mute chola.com 4h` · `unmute chola.com` · `mutes`
+  - **queries** — `status` · `campaigns` · `check <campaign>` · `report <campaign>` · `feedback`
+  - **alert buttons** — Ack / Snooze / Mute on each alert · `✅ recovered` when it clears
+  - **App Home** — a live dashboard of scope, owners, rules & mutes
+
+  Only real secrets (API keys, Slack tokens) stay in env. See
+  [`docs/scope-control.md`](docs/scope-control.md).
+- The `[owners]` / `[[expected]]` blocks in `config.toml` still work as seed defaults that
+  Slack overrides — useful for baking a baseline into the deploy image.
 
 ## Deployment
 
@@ -114,9 +136,9 @@ deprecated, kept for reference.)
 
 ```
 src/sarvam_alerting/
-  config.py · models.py · engine.py · cli.py · state.py · scope.py · deeplinks.py
+  config.py · models.py · engine.py · cli.py · state.py · scope.py · owners.py · deeplinks.py
   clients/    metabase · scheduling · llm · samvaad(stub)
-  detectors/  8 detectors (see table above)
+  detectors/  10 detectors + scan-level stalled-campaign check (see table above)
   reports/    run_summary · cycle_report · weekly_evals · client_report · (+LLM, guarded)
   notify/     console · slack_webhook · slack_bot · gsheet
   control/    slack scope-control (Socket Mode)

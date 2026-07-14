@@ -14,7 +14,9 @@ dist/
 # local working config (commit config.example.toml only)
 config/config.toml
 state.db
+# runtime control store (scope/owners/expected/mutes/feedback) — may hold internal ids
 scope.json
+store.json
 .sarvam-alerting/
 
 # Local editor/tooling config that may contain secrets

@@ -98,6 +98,9 @@ class Config:
     expected: tuple  # list of expected-value / cohort-size rules (raw dicts)
     llm: dict  # LLM config for transcript analysis (may be empty)
     links: dict  # deep-link templates (metabase / call URLs)
+    owners: dict  # engagement-owner tagging rules (org/campaign -> Slack ids)
+    mutes: dict = field(default_factory=dict)  # runtime mutes (campaign substr -> until epoch|None)
+    tuning: dict = field(default_factory=dict)  # shadow_mode / escalation / heartbeat knobs
 
 
 def _require_env(var: str) -> str:
@@ -217,6 +220,8 @@ def load_config(config_path: str | os.PathLike | None = None) -> Config:
         expected = tuple(raw.get("expected", []))
         llm = dict(raw.get("llm", {}))
         links = dict(raw.get("links", {}))
+        owners = dict(raw.get("owners", {}))
+        tuning = dict(raw.get("tuning", {}))
     except KeyError as exc:
         raise ConfigError(f"Missing required config key: {exc}") from exc
 
@@ -231,6 +236,8 @@ def load_config(config_path: str | os.PathLike | None = None) -> Config:
         expected=expected,
         llm=llm,
         links=links,
+        owners=owners,
+        tuning=tuning,
     )
     # Overlay the runtime scope store (e.g. Slack-controlled) if configured.
     # Imported here (not at module top) to avoid a circular import: scope imports config.

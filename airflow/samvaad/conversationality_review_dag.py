@@ -72,7 +72,7 @@ def samvaad_conversationality_review():
             report, findings = build_conversationality_review(mb, cfg, llm, ids)
 
         meta = {"campaigns_scanned": len(ids)}
-        for notifier in build_notifiers(cfg.notifiers):
+        for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
             if notifier.wants("alerts"):
                 notifier.notify(findings, meta)
             if report and notifier.wants("reports"):

@@ -4,6 +4,7 @@ Commands:
   check          One-off scan, printed to the console (ignores cooldown state).
   watch          Scheduled scan -> configured notifiers, with dedupe/cooldown.
   list-campaigns Show the campaigns that would be monitored right now.
+  owners         View/add/remove engagement owners (who gets @-mentioned on alerts).
   test-notify    Send a synthetic finding through the configured notifiers.
 """
 
@@ -25,6 +26,8 @@ from .engine import build_reports, discover_campaigns, run_scan
 from .models import Finding, Report, Severity
 from .notify import Notifier, build_notifiers
 from .notify.console import ConsoleNotifier
+from .owners import OwnerResolver, parse_ids
+from .scope import RuntimeStore, is_muted
 from .reports import (
     build_client_reports,
     build_conversationality_review,
@@ -75,8 +78,8 @@ def check(
     _setup_logging(verbose)
     cfg = _load(config, current_hours, baseline_hours)
     with MetabaseClient(cfg.metabase) as mb:
-        findings, campaigns = run_scan(mb, cfg, only_campaign=campaign)
-    ConsoleNotifier(Severity.INFO, links=cfg.links).notify(
+        findings, campaigns = run_scan(mb, cfg, only_campaign=campaign, apply_mutes=False)
+    ConsoleNotifier(Severity.INFO, links=cfg.links, owners=OwnerResolver(cfg.owners)).notify(
         findings, {"campaigns_scanned": len(campaigns)}
     )
     if any(f.severity == Severity.CRITICAL for f in findings):
@@ -93,8 +96,19 @@ def watch(
     """Scan on a schedule and deliver new findings to the configured notifiers."""
     _setup_logging(verbose)
     cfg = _load(config, None, None)
-    notifiers = build_notifiers(cfg.notifiers, cfg.links)
+    notifiers = build_notifiers(cfg.notifiers, cfg.links, cfg.owners)
     state = StateStore(cfg.state.path, cfg.state.cooldown_hours)
+
+    shadow = bool(cfg.tuning.get("shadow_mode", False))
+    escalate_after = int(cfg.tuning.get("escalate_after_minutes", 30)) * 60
+    if shadow:
+        log.warning("SHADOW MODE: alerts are logged to console only, not delivered to Slack.")
+
+    def _alert_notifiers() -> list[Notifier]:
+        # In shadow mode, only the console sees alerts (tune without spamming Slack).
+        if shadow:
+            return [n for n in notifiers if isinstance(n, ConsoleNotifier)]
+        return notifiers
 
     def one_pass() -> None:
         with MetabaseClient(cfg.metabase) as mb:
@@ -105,11 +119,33 @@ def watch(
             "scan complete: %d finding(s), %d new, %d campaign(s), %d report(s)",
             len(findings), len(new), len(campaigns), len(reports),
         )
+        # Recovery: anything that was open (within cooldown) but is absent now has cleared.
+        current_fps = {f.fingerprint for f in findings}
+        now = time.time()
+        resolved = [
+            a for a in state.active_findings(now)
+            if a["fingerprint"] not in current_fps
+            and not is_muted(a["campaign_id"], cfg.mutes, now)
+        ]
+        # Escalation: still-open criticals nobody acknowledged (muted = acknowledged).
+        escalations = [
+            e for e in state.escalation_candidates(escalate_after, now)
+            if e["fingerprint"] in current_fps
+            and not is_muted(e["campaign_id"], cfg.mutes, now)
+        ]
+
         meta = {"campaigns_scanned": len(campaigns)}
-        for notifier in notifiers:
+        for notifier in _alert_notifiers():
             try:
                 if notifier.wants("alerts"):
                     notifier.notify(new, meta)
+                    notifier.notify_recovery(resolved)
+                    notifier.notify_escalation(escalations)
+            except Exception:
+                log.exception("notifier %s failed", type(notifier).__name__)
+        # Reports/digests are not alarms — they post even in shadow mode.
+        for notifier in notifiers:
+            try:
                 if notifier.wants("reports"):
                     for report in reports:
                         notifier.deliver_report(report)
@@ -117,6 +153,11 @@ def watch(
                 log.exception("notifier %s failed", type(notifier).__name__)
         for f in new:
             state.mark_notified(f)
+        for a in resolved:
+            state.clear(a["fingerprint"])
+        for e in escalations:
+            state.mark_escalated(e["fingerprint"])
+        state.beat(now)  # heartbeat: record a successful pass for the dead-man's switch
 
     try:
         if once:
@@ -164,7 +205,7 @@ def _deliver_report(cfg: Config, report: Report | None) -> None:
         console.print("[yellow]Nothing to report.[/yellow]")
         return
     ConsoleNotifier(Severity.INFO, ("reports",), cfg.links).deliver_report(report)
-    for notifier in build_notifiers(cfg.notifiers, cfg.links):
+    for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
         if isinstance(notifier, ConsoleNotifier) or not notifier.wants("reports"):
             continue
         try:
@@ -240,9 +281,9 @@ def conversationality_review(
         report, findings = build_conversationality_review(mb, cfg, llm, ids)
 
     meta = {"campaigns_scanned": len(ids)}
-    ConsoleNotifier(Severity.INFO, ("alerts",), cfg.links).notify(findings, meta)
+    ConsoleNotifier(Severity.INFO, ("alerts",), cfg.links, OwnerResolver(cfg.owners)).notify(findings, meta)
     _deliver_report(cfg, report)
-    for notifier in build_notifiers(cfg.notifiers, cfg.links):
+    for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
         if isinstance(notifier, ConsoleNotifier) or not notifier.wants("alerts"):
             continue
         try:
@@ -274,9 +315,9 @@ def value_correctness(
         report, findings = build_value_correctness_review(mb, cfg, llm, ids)
 
     meta = {"campaigns_scanned": len(ids)}
-    ConsoleNotifier(Severity.INFO, ("alerts",), cfg.links).notify(findings, meta)
+    ConsoleNotifier(Severity.INFO, ("alerts",), cfg.links, OwnerResolver(cfg.owners)).notify(findings, meta)
     _deliver_report(cfg, report)
-    for notifier in build_notifiers(cfg.notifiers, cfg.links):
+    for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
         if isinstance(notifier, ConsoleNotifier) or not notifier.wants("alerts"):
             continue
         try:
@@ -308,8 +349,9 @@ def client_report(
 def control_server(
     config: str = typer.Option(None, "--config", help="Path to config.toml."),
 ) -> None:
-    """Run the Slack scope-control service (Socket Mode, always-on). Needs slack_bolt +
-    SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and SARVAM_ALERTING_SCOPE_URI."""
+    """Run the Slack control service (Socket Mode, always-on): scope + owners + expected
+    rules, all from Slack. Needs slack_bolt + SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and
+    SARVAM_ALERTING_SCOPE_URI."""
     _setup_logging(True)
     _load(config, None, None)  # validate config/secrets before starting the loop
     missing = [v for v in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN") if not os.environ.get(v)]
@@ -317,14 +359,184 @@ def control_server(
         console.print(f"[red]Missing env: {', '.join(missing)}[/red] (Socket Mode needs both).")
         raise typer.Exit(code=2)
     if not os.environ.get("SARVAM_ALERTING_SCOPE_URI"):
-        console.print("[yellow]SARVAM_ALERTING_SCOPE_URI not set — using local scope.json.[/yellow]")
+        console.print("[yellow]SARVAM_ALERTING_SCOPE_URI not set — using local store.json.[/yellow]")
     try:
         from .control.slack_control import run  # optional dep: slack_bolt
     except ImportError:
         console.print("[red]slack_bolt not installed.[/red] Run: uv pip install 'slack-bolt>=1.18'")
         raise typer.Exit(code=2)
-    console.print("[green]Starting Slack scope-control service (Ctrl-C to stop)…[/green]")
+    console.print("[green]Starting Slack control service (Ctrl-C to stop)…[/green]")
     run()
+
+
+owners_app = typer.Typer(
+    add_completion=False,
+    help="View / add / remove engagement owners (who gets @-mentioned on alerts).",
+)
+app.add_typer(owners_app, name="owners")
+
+_SEVERITIES = ("info", "warning", "critical")
+
+
+def _runtime_store(store: str | None) -> tuple[RuntimeStore, str, bool]:
+    """Resolve the runtime store: --store, else $SARVAM_ALERTING_SCOPE_URI, else store.json.
+    Returns (store, uri, env_is_set) — scans only read owners when the env var is set."""
+    env = os.environ.get("SARVAM_ALERTING_SCOPE_URI", "").strip()
+    uri = store or env or "store.json"
+    return RuntimeStore(uri), uri, bool(env)
+
+
+def _print_owners(owners: dict, uri: str) -> None:
+    if not (owners.get("org") or owners.get("campaign") or owners.get("default")):
+        console.print(f"[dim]{uri}[/dim]  —  no engagement owners set.")
+        return
+    table = Table(
+        title=f"Engagement owners  (paged at \u2265 {owners.get('min_severity', 'critical')})  ·  {uri}"
+    )
+    table.add_column("kind")
+    table.add_column("match key")
+    table.add_column("owner ids")
+    for key, ids in (owners.get("campaign") or {}).items():
+        table.add_row("campaign", key, " ".join(ids))
+    for key, ids in (owners.get("org") or {}).items():
+        table.add_row("org", key, " ".join(ids))
+    if owners.get("default"):
+        table.add_row("default", "*", " ".join(owners["default"]))
+    console.print(table)
+
+
+def _store_hint(env_is_set: bool, uri: str) -> None:
+    if not env_is_set:
+        console.print(
+            f"[yellow]Heads up:[/yellow] scans read owners from the store only when "
+            f"[bold]SARVAM_ALERTING_SCOPE_URI[/bold] is set. To activate this file, run:\n"
+            f"  export SARVAM_ALERTING_SCOPE_URI={uri}"
+        )
+
+
+@owners_app.command("list")
+def owners_list(
+    store: str = typer.Option(None, "--store", help="Runtime store URI (default: $SARVAM_ALERTING_SCOPE_URI or store.json)."),
+) -> None:
+    """Show the current engagement owners."""
+    rs, uri, _ = _runtime_store(store)
+    _print_owners(rs.load_owners(), uri)
+
+
+@owners_app.command("add")
+def owners_add(
+    key: str = typer.Argument(..., help="org/campaign substring, e.g. chola.com or PAPQ."),
+    ids: list[str] = typer.Argument(..., help="Slack ids: U0.. / S0.. / here (names don't ping)."),
+    kind: str = typer.Option(None, "--kind", help="org|campaign (default: infer — a dotted key is an org)."),
+    store: str = typer.Option(None, "--store"),
+) -> None:
+    """Add owner(s) for an org or campaign."""
+    rs, uri, env_is_set = _runtime_store(store)
+    parsed = parse_ids(ids)
+    if not parsed:
+        console.print("[red]No valid Slack ids.[/red] Use U…/S…/here (plain names can't be @-mentioned).")
+        raise typer.Exit(code=2)
+    if kind and kind not in ("org", "campaign"):
+        console.print("[red]--kind must be org or campaign.[/red]")
+        raise typer.Exit(code=2)
+    section = kind or ("org" if "." in key else "campaign")
+    owners = rs.load_owners()
+    owners.setdefault(section, {})
+    owners[section][key] = sorted(set(owners[section].get(key, [])) | set(parsed))
+    owners.setdefault("min_severity", "critical")
+    rs.save_owners(owners)
+    console.print(f"[green]Added[/green] {parsed} to {section} `{key}`.")
+    _print_owners(owners, uri)
+    _store_hint(env_is_set, uri)
+
+
+@owners_app.command("remove")
+def owners_remove(
+    key: str = typer.Argument(..., help="org/campaign match key to remove from."),
+    ids: list[str] = typer.Argument(None, help="Specific ids to remove (omit to remove the whole key)."),
+    store: str = typer.Option(None, "--store"),
+) -> None:
+    """Remove an owner id, or the whole key if no ids are given."""
+    rs, uri, env_is_set = _runtime_store(store)
+    owners = rs.load_owners()
+    parsed = set(parse_ids(ids)) if ids else set()
+    removed = False
+    for section in ("org", "campaign"):
+        section_map = owners.get(section, {})
+        if key in section_map:
+            if parsed:
+                section_map[key] = [x for x in section_map[key] if x not in parsed]
+                if not section_map[key]:
+                    section_map.pop(key)
+            else:
+                section_map.pop(key)
+            removed = True
+    rs.save_owners(owners)
+    console.print("[green]Updated.[/green]" if removed else f"[yellow]No owner rule for `{key}`.[/yellow]")
+    _print_owners(owners, uri)
+    _store_hint(env_is_set, uri)
+
+
+@owners_app.command("min")
+def owners_min(
+    severity: str = typer.Argument(..., help="info | warning | critical — only page owners at/above this."),
+    store: str = typer.Option(None, "--store"),
+) -> None:
+    """Set the minimum severity at which owners get @-mentioned."""
+    if severity.lower() not in _SEVERITIES:
+        console.print(f"[red]severity must be one of {_SEVERITIES}.[/red]")
+        raise typer.Exit(code=2)
+    rs, uri, env_is_set = _runtime_store(store)
+    owners = rs.load_owners()
+    owners["min_severity"] = severity.lower()
+    rs.save_owners(owners)
+    console.print(f"[green]Owners now paged at \u2265 {severity.lower()}.[/green]")
+    _store_hint(env_is_set, uri)
+
+
+@app.command("heartbeat-check")
+def heartbeat_check(
+    config: str = typer.Option(None, "--config", help="Path to config.toml."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Dead-man's switch: alert if the scan hasn't run successfully recently.
+
+    Run this on a SEPARATE schedule from `watch` (ideally a different host/DAG) so it still
+    fires if the main scan is dead. Reads the scan's heartbeat from the shared state store.
+    """
+    _setup_logging(verbose)
+    cfg = _load(config, None, None)
+    max_silence_h = float(cfg.tuning.get("heartbeat_max_silence_hours", 2.0))
+    state = StateStore(cfg.state.path, cfg.state.cooldown_hours)
+    last = state.last_beat()
+    state.close()
+    now = time.time()
+
+    if last is not None and (now - last) < max_silence_h * 3600:
+        mins = int((now - last) / 60)
+        console.print(f"[green]OK[/green] — last successful scan {mins} min ago.")
+        return
+
+    ago = "never" if last is None else f"{int((now - last) / 3600)}h ago"
+    finding = Finding(
+        detector="heartbeat",
+        severity=Severity.CRITICAL,
+        campaign_id="ALERTING-SYSTEM",
+        title="Alerting scan has stopped running",
+        detail=(
+            f"No successful scan in over {max_silence_h:g}h (last: {ago}). The watchdog may be "
+            f"down — alerts are NOT being generated right now. Check the scan job/DAG."
+        ),
+        dedupe_key="heartbeat:stale",
+    )
+    console.print(f"[red]STALE[/red] — last successful scan {ago}. Alerting.")
+    for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
+        if notifier.wants("alerts"):
+            try:
+                notifier.notify([finding], {"campaigns_scanned": 0})
+            except Exception:
+                log.exception("notifier %s failed", type(notifier).__name__)
+    raise typer.Exit(code=1)
 
 
 @app.command("test-notify")
@@ -334,7 +546,7 @@ def test_notify(
     """Send a synthetic critical finding through all configured notifiers."""
     _setup_logging(False)
     cfg = _load(config, None, None)
-    notifiers = build_notifiers(cfg.notifiers, cfg.links)
+    notifiers = build_notifiers(cfg.notifiers, cfg.links, cfg.owners)
     demo = Finding(
         detector="variable_collapse",
         severity=Severity.CRITICAL,

@@ -54,20 +54,50 @@ Each alert names the campaign, says what's wrong in plain language, and links to
 **Still manual (for now):** the pre-launch **spam-number check** and setting up the
 **test campaign** — those need inputs the system can't pull yet.
 
-## Controlling what's monitored (from Slack, no code)
-You decide which clients/campaigns are watched by messaging the bot — changes apply on the
-next run, no deploy:
-- `@alerts monitor chola.com` — watch **only** Chola (onboard client-by-client)
-- `@alerts include PAPQ` — only PAPQ-type campaigns · `@alerts exclude test` — drop test runs
-- `@alerts scope` — see what's currently monitored · `@alerts reset` — watch everything
-Full list in `docs/scope-control.md`.
+## You run it from Slack — no code, no files
+You control everything the system does by messaging the bot. Changes apply on the next run,
+no deploy. Three things you own:
 
-## What you need to give it (one-time, per use-case)
-The system can't know your business rules until you tell it. Hand these to whoever configures it:
-1. **Expected values** per use-case — e.g. "D2C loan type must be *Digital Personal Loan*",
-   "Samsung must be *Samsung Mobile Loan*". These power the `expected_values` alert.
-2. **Expected cohort sizes** — roughly how many rows each client sends, so it can flag mismatches.
-3. **Which Slack channels** alerts and reports should go to (per client if you want).
+**What's watched**
+- `@alerts monitor chola.com` — watch **only** Chola (onboard client-by-client)
+- `@alerts include PAPQ` — only PAPQ campaigns · `@alerts exclude test` — drop test runs
+- `@alerts scope` — see what's watched · `@alerts reset` — watch everything
+
+**Who gets paged** (engagement owners)
+- `@alerts owner chola.com @you` — tag yourself (or teammates) on Chola alerts
+- `@alerts owner campaign PAPQ @you` — tag on a specific campaign
+- `@alerts unowner chola.com` — remove · `@alerts owner-min critical` — severity gate · `@alerts owners` — show
+- No Slack bot yet? Do the same from a terminal: `sarvam-alerting owners add chola.com U0…`,
+  `owners remove chola.com U0…`, `owners list` (writes the same store the scans read).
+
+**The sanity rules** (what a value *should* be)
+- `@alerts expect D2C loan_type = Digital Personal Loan | Samsung Mobile Loan`
+- `@alerts expect JUNE cohort 50000` · `@alerts expected` — show
+
+**Silence noise** (without dropping coverage)
+- `@alerts mute chola.com 4h` — snooze alerts for 4h · `@alerts unmute chola.com` · `@alerts mutes`
+
+**Ask it things** (live, on demand)
+- `@alerts status` — what's active + current settings · `@alerts campaigns` — list them
+- `@alerts check <campaign>` — scan one campaign right now · `@alerts report <campaign>` — cycle report
+
+**On each alert** you also get buttons — *Ack*, *Snooze 4h*, *Mute*, *Open in Metabase* — and a
+`✅ recovered` note when the problem clears. The bot's **Home** tab is a live dashboard of
+everything currently set.
+
+Full list in `docs/scope-control.md`. The only things not in Slack are secrets (API keys /
+tokens) — those live in the deploy for security.
+
+## What you need to tell it (one-time, per use-case)
+The system can't know your business rules until you tell it — and you tell it **in Slack**,
+not in a file:
+1. **Expected values** per use-case — `expect D2C loan_type = Digital Personal Loan`. Powers
+   the `expected_values` alert.
+2. **Expected cohort sizes** — `expect <campaign> cohort <n>`, so it flags size mismatches.
+3. **Engagement owner** per client/campaign — `owner chola.com @you`, so the right person is
+   pinged when that client's campaign breaks (critical alerts only, by default).
+
+The one thing set at deploy (not Slack): **which channels** alerts vs reports post to.
 
 ## Important honesty
 - It reads **numbers and variables**, not the **words** of the call (transcripts are

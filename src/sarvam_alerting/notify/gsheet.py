@@ -22,6 +22,7 @@ import os
 import gspread
 
 from ..models import Finding, Severity
+from ..owners import OwnerResolver
 from .base import Notifier
 
 
@@ -37,8 +38,9 @@ class GSheetNotifier(Notifier):
         options: dict,
         streams: tuple[str, ...] = ("alerts",),
         links: dict | None = None,
+        owners: OwnerResolver | None = None,
     ):
-        super().__init__(min_severity, streams, links)
+        super().__init__(min_severity, streams, links, owners)
         self._sheet_id = options.get("sheet_id")
         if not self._sheet_id:
             raise ValueError("gsheet notifier: 'sheet_id' is required.")

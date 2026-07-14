@@ -63,7 +63,7 @@ def samvaad_cycle_report():
             ids = [c.campaign_id for c in discover_campaigns(mb, cfg)]
             report = build_cycle_report(mb, cfg, ids)
         if report:
-            for notifier in build_notifiers(cfg.notifiers):
+            for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
                 if notifier.wants("reports"):
                     notifier.deliver_report(report)
         print(f"cycle report: {len(ids)} campaigns, report={'yes' if report else 'none'}")

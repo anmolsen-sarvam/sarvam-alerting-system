@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import time
 from datetime import datetime
 
 from .clients.metabase import MetabaseClient, sql_str
 from .config import Config
 from .detectors import Detector, DetectorContext, build_detectors
+from .detectors.stalled import find_stalled_campaigns
 from .models import CampaignInfo, Finding, Report
 from .reports import build_cycle_report, build_run_summary
+from .scope import is_muted
 
 log = logging.getLogger("sarvam_alerting.engine")
 
@@ -159,8 +162,13 @@ def run_scan(
     metabase: MetabaseClient,
     config: Config,
     only_campaign: str | None = None,
+    apply_mutes: bool = True,
 ) -> tuple[list[Finding], list[CampaignInfo]]:
-    """Full scan: returns (all findings, campaigns scanned)."""
+    """Full scan: returns (all findings, campaigns scanned).
+
+    ``apply_mutes`` drops findings for campaigns muted from Slack (the alerting path).
+    The one-off ``check`` command passes False so it stays fully diagnostic.
+    """
     detectors = build_detectors(config.detectors)
 
     if only_campaign:
@@ -172,6 +180,21 @@ def run_scan(
     for campaign in campaigns:
         log.info("scanning campaign %s (%s calls)", campaign.campaign_id, campaign.calls)
         all_findings.extend(run_campaign(metabase, campaign, config, detectors))
+
+    # Stalled/zero-dial campaigns won't appear in `campaigns` (they're below the call
+    # threshold), so check them separately from the scheduling side. Skip for single-campaign.
+    if not only_campaign and config.detectors.get("stalled_campaign", {}).get("enabled", True):
+        try:
+            all_findings.extend(find_stalled_campaigns(metabase, config))
+        except Exception:
+            log.exception("stalled-campaign detection failed")
+
+    if apply_mutes and config.mutes:
+        now = time.time()
+        kept = [f for f in all_findings if not is_muted(f.campaign_id, config.mutes, now)]
+        if len(kept) != len(all_findings):
+            log.info("mutes suppressed %d finding(s)", len(all_findings) - len(kept))
+        all_findings = kept
     return all_findings, campaigns
 
 

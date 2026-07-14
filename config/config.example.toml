@@ -25,7 +25,9 @@ baseline_hours = 72
 # "facts": scan EngagementFacts for campaigns with >= min_calls in the current window.
 source = "scheduling"
 statuses = ["active", "running"]   # scheduling source: which campaign statuses count as active
-min_calls = 500                     # facts source only
+min_calls = 50                      # min calls in the current window to scan a campaign. Low so
+                                    # small campaigns are still covered (detectors self-gate on
+                                    # their own min_calls). Use org/campaign scoping to bound breadth.
 exclude = ["NO_CAMPAIGN_ID", ""]
 # Optional allowlist; empty means "all discovered campaigns".
 only = []
@@ -46,6 +48,26 @@ per_contact_min_ratio = 0.05   # ...or distinct/calls >= this in baseline
 collapse_max_distinct = 1      # current considered "collapsed" if distinct values <= this
 use_required_hints = true      # consult cohort_transformations: a `required` var that collapsed is high-confidence
                                # (also lets brand-new campaigns be caught before a baseline exists)
+
+[detectors.stalled_campaign]
+enabled = true                 # active campaign with a cohort uploaded but (almost) no calls =
+                               # dialing stalled. Catches a silent failure the per-campaign
+                               # detectors miss (stalled campaigns never clear discovery).
+min_cohort = 50                # only judge campaigns with at least this many valid records
+min_calls = 5                  # flag if fewer than this many calls in the window
+grace_hours = 2.0              # ignore campaigns that just started (give the dialer time)
+window_hours = 6               # call-count window
+lookback_hours = 24            # how far back to consider a campaign "recently active"
+
+[detectors.value_sanity]
+enabled = true                 # semantic complement to variable_collapse: flags placeholder /
+                               # un-rendered-template / implausible values on readable variables
+min_calls = 100                # need at least this many calls with the variable set to judge
+min_share = 0.10               # flag a bad-looking value covering >= this share of calls
+max_distinct_per_var = 20      # inspect the top-N most common values per variable
+use_llm = false                # opt-in: LLM adjudicates ambiguous/implausible values (uses [llm])
+llm_max_vars = 15              # cap variables sent to the LLM (cost control)
+llm_values_per_var = 8         # cap values-per-variable sent to the LLM
 
 [detectors.connectivity]
 enabled = true                 # both signals are baseline-relative (absolute rates are
@@ -139,6 +161,15 @@ enabled = true                 # runs the [[expected]] rules below (no rules = n
 # cohort_size = 50000
 # cohort_tolerance_pct = 25
 
+[tuning]
+# Operational knobs for trust + reliability.
+shadow_mode = false            # true = run detectors but DON'T post alerts to Slack (console
+                               # only). Use during onboarding to watch alert volume and tune
+                               # thresholds before anyone gets pinged. Digests still post.
+escalate_after_minutes = 30    # re-ping owners if a CRITICAL stays open + unacknowledged this long
+                               # (Ack/Mute from Slack counts as acknowledged)
+heartbeat_max_silence_hours = 2  # `heartbeat-check` alerts if no successful scan within this window
+
 [state]
 path = "~/.sarvam-alerting/state.db"
 cooldown_hours = 6             # don't re-alert the same finding within this window
@@ -215,6 +246,22 @@ timeout_seconds = 60
 name = "gpt-4.1-mini"
 url = "https://azure-openai-deployment-agents.openai.azure.com/openai/deployments/gpt-4.1-mini/chat/completions?api-version=2025-01-01-preview"
 api_key_env = "AZURE_OPENAI_API_KEY"
+
+# ---- Engagement-owner tagging: @-mention the right person when things go wrong ----
+# Turns an alert into an action — the owner of that client is pinged in Slack so a silent
+# regression lands in someone's notifications, not just a channel. Matching is by substring:
+# campaign rules first (most specific), then org, then `default`. Only real Slack IDs ping:
+#   user id      -> "U0123ABCD" (Profile ▸ ⋯ ▸ Copy member ID)
+#   user group   -> "S0123TEAM" (renders as a group mention)
+#   keyword      -> "here" / "channel"     (plain @names do NOT notify, so they're ignored)
+[owners]
+min_severity = "critical"      # only tag owners at/above this severity (avoid pinging on every warning)
+# default = ["U0000DEFAULT"]   # fallback owner(s) when no org/campaign rule matches
+# [owners.org]                 # org_id substring -> owner(s)
+# "chola.com" = ["U0AAAA1111", "S0CHOLATEAM"]
+# "tatacapital-housing.com" = ["U0BBBB2222"]
+# [owners.campaign]            # campaign_id substring -> owner(s) (wins over org)
+# "PAPQ" = ["U0CCCC3333"]
 
 # ---- Notifiers (evaluated in order). At least one recommended. ----
 # Each block:

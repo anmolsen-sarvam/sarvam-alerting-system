@@ -15,6 +15,8 @@ from sarvam_alerting.config import (
 from sarvam_alerting.detectors.base import DetectorContext
 from sarvam_alerting.detectors.connectivity import ConnectivityDetector
 from sarvam_alerting.detectors.expected_values import ExpectedValuesDetector
+from sarvam_alerting.detectors import value_sanity as vs
+from sarvam_alerting.detectors.value_sanity import ValueSanityDetector, heuristic_reason
 from sarvam_alerting.detectors.variable_collapse import VariableCollapseDetector
 from sarvam_alerting.models import CampaignInfo, Severity
 
@@ -45,6 +47,7 @@ def _config(expected=()) -> Config:
         expected=expected,
         llm={},
         links={},
+        owners={},
     )
 
 
@@ -133,6 +136,96 @@ def test_expected_values_ignores_non_matching_campaign():
     rule = {"match_campaign_contains": "ZZZ", "variable": "loan_type", "allowed": ["Right"]}
     findings = ExpectedValuesDetector({"enabled": True}).run(_ctx(rows, expected=(rule,)))
     assert findings == []
+
+
+def test_heuristic_reason():
+    assert heuristic_reason("{{customer_name}}") == "un-rendered template token"
+    assert heuristic_reason("%first_name%") == "un-rendered template token"
+    assert heuristic_reason("<name>") == "un-rendered template token"
+    assert heuristic_reason("Customer") == "placeholder/default value"
+    assert heuristic_reason("N/A") == "placeholder/default value"
+    assert heuristic_reason("Rahul Sharma") is None       # a real name
+    assert heuristic_reason("50000") is None               # a real amount
+    assert heuristic_reason("") is None
+
+
+def test_value_sanity_flags_template_and_placeholder():
+    rows = [
+        # un-rendered template across 90% of calls -> CRITICAL
+        {"key": "customer_name", "val": "{{customer_name}}", "c": 900, "total": 1000},
+        {"key": "customer_name", "val": "Rahul", "c": 100, "total": 1000},
+        # placeholder word across 15% -> WARNING
+        {"key": "city", "val": "Customer", "c": 150, "total": 1000},
+        {"key": "city", "val": "Mumbai", "c": 850, "total": 1000},
+        # a legit varied field -> no finding
+        {"key": "emi", "val": "5000", "c": 600, "total": 1000},
+        {"key": "emi", "val": "7500", "c": 400, "total": 1000},
+    ]
+    # use_cohort_hints=False -> placeholder words are flagged without an input lookup.
+    findings = ValueSanityDetector({"enabled": True, "use_cohort_hints": False}).run(_ctx(rows))
+    by_var = {f.metrics["variable"]: f for f in findings}
+    assert set(by_var) == {"customer_name", "city"}
+    assert by_var["customer_name"].severity == Severity.CRITICAL
+    assert by_var["city"].severity == Severity.WARNING
+    assert by_var["customer_name"].metrics["source"] == "rule"
+
+
+def test_value_sanity_placeholder_gated_to_cohort_inputs(monkeypatch):
+    rows = [
+        # template token: flagged regardless of input/output
+        {"key": "customer_name", "val": "{{name}}", "c": 1000, "total": 1000},
+        # placeholder on a cohort INPUT -> flagged
+        {"key": "city", "val": "Customer", "c": 900, "total": 1000},
+        # placeholder on an agent OUTPUT slot (na at start is normal) -> NOT flagged
+        {"key": "disposition", "val": "na", "c": 1000, "total": 1000},
+    ]
+    monkeypatch.setattr(
+        vs.ValueSanityDetector, "_cohort_inputs",
+        lambda self, ctx: {"customer_name", "city"},
+    )
+    findings = ValueSanityDetector({"enabled": True}).run(_ctx(rows))
+    flagged = {f.metrics["variable"] for f in findings}
+    assert flagged == {"customer_name", "city"}
+    assert "disposition" not in flagged
+
+
+def test_value_sanity_ignores_below_min_share():
+    rows = [
+        {"key": "city", "val": "Customer", "c": 50, "total": 1000},   # 5% < 10%
+        {"key": "city", "val": "Mumbai", "c": 950, "total": 1000},
+    ]
+    assert ValueSanityDetector({"enabled": True, "use_cohort_hints": False}).run(_ctx(rows)) == []
+
+
+def test_value_sanity_llm_adjudicates_implausible(monkeypatch):
+    rows = [
+        {"key": "customer_name", "val": "12345", "c": 700, "total": 1000},
+        {"key": "customer_name", "val": "67890", "c": 300, "total": 1000},
+    ]
+
+    class FakeLLM:
+        def json(self, system, user, **kw):
+            return {"suspicious": [
+                {"variable": "customer_name", "value": "12345", "reason": "name is a number"},
+            ]}
+
+    monkeypatch.setattr(vs.LLMClient, "from_config", staticmethod(lambda cfg: FakeLLM()))
+    # use_cohort_hints=False -> all vars are LLM candidates (no input lookup in the fake).
+    findings = ValueSanityDetector({"enabled": True, "use_llm": True, "use_cohort_hints": False}).run(_ctx(rows))
+    assert len(findings) == 1
+    assert findings[0].metrics["source"] == "LLM"
+    assert findings[0].metrics["variable"] == "customer_name"
+    assert findings[0].severity == Severity.CRITICAL   # 70% share
+
+
+def test_value_sanity_no_llm_when_disabled(monkeypatch):
+    rows = [{"key": "customer_name", "val": "12345", "c": 700, "total": 1000}]
+
+    def boom(cfg):
+        raise AssertionError("LLM must not be called when use_llm is false")
+
+    monkeypatch.setattr(vs.LLMClient, "from_config", staticmethod(boom))
+    assert ValueSanityDetector({"enabled": True, "use_llm": False}).run(_ctx(rows)) == []
 
 
 def test_severity_ordering():

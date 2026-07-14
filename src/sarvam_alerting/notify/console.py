@@ -8,6 +8,7 @@ from rich.text import Text
 
 from ..deeplinks import finding_links
 from ..models import Finding, Report, Severity
+from ..owners import OwnerResolver
 from .base import Notifier, group_by_campaign
 
 _STYLE = {
@@ -23,8 +24,9 @@ class ConsoleNotifier(Notifier):
         min_severity: Severity,
         streams: tuple[str, ...] = ("alerts",),
         links: dict | None = None,
+        owners: OwnerResolver | None = None,
     ):
-        super().__init__(min_severity, streams, links)
+        super().__init__(min_severity, streams, links, owners)
         self._console = Console()
 
     def _emit(self, findings: list[Finding], meta: dict) -> None:
@@ -47,6 +49,12 @@ class ConsoleNotifier(Notifier):
                     evidence.append("calls: " + ", ".join(i[:8] for i in f.interaction_ids[:3]))
                 if evidence:
                     body.append("   " + "  ".join(evidence) + "\n", style="dim")
+            if self.owners is not None:
+                org_id = items[0].org_id if items else ""
+                worst_rank = max(f.severity.rank for f in items)
+                mentions = self.owners.mentions_for(org_id, campaign_id, worst_rank)
+                if mentions:
+                    body.append("   owners: " + " ".join(mentions) + "\n", style="magenta")
             self._console.print(
                 Panel(body, title=f"campaign {campaign_id}", border_style="red")
             )
@@ -59,3 +67,16 @@ class ConsoleNotifier(Notifier):
         for section in report.sections:
             body.append(f"\n{section}\n")
         self._console.print(Panel(body, title=report.title, border_style="cyan"))
+
+    def _emit_recovery(self, recoveries: list[dict]) -> None:
+        for r in recoveries:
+            self._console.print(
+                f"[green]RECOVERED[/green] {r['campaign_id']}: {r['title']}"
+            )
+
+    def _emit_escalation(self, items: list[dict]) -> None:
+        for r in items:
+            self._console.print(
+                f"[bold red]ESCALATION[/bold red] {r['campaign_id']}: {r['title']} "
+                f"(still unresolved)"
+            )

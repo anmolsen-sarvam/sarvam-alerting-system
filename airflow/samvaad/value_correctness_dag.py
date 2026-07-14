@@ -71,7 +71,7 @@ def samvaad_value_correctness():
             report, findings = build_value_correctness_review(mb, cfg, llm, ids)
 
         meta = {"campaigns_scanned": len(ids)}
-        for notifier in build_notifiers(cfg.notifiers, cfg.links):
+        for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
             if notifier.wants("alerts"):
                 notifier.notify(findings, meta)
             if report and notifier.wants("reports"):

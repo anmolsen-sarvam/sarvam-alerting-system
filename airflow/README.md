@@ -9,6 +9,7 @@ Airflow/Kubernetes platform (`sarvamai/airflow-dags`), under the **`samvaad`** t
 airflow/
 ├── samvaad/                              # -> copy into airflow-dags/samvaad/
 │   ├── alerting_scan_dag.py              # every 30 min: detectors + run summary -> Slack
+│   ├── heartbeat_dag.py                  # :15/:45 dead-man's switch: alert if the scan stopped
 │   ├── cycle_report_dag.py               # daily ~19:30 IST: connectivity/engagement/PTP/dispositions
 │   ├── conversationality_review_dag.py   # daily ~20:30 IST: LLM transcript scoring (Layer B)
 │   ├── value_correctness_dag.py          # daily ~21:30 IST: LLM "are values stated correctly?"
@@ -34,14 +35,15 @@ airflow/
    | `slack-webhook-url` | (optional) incoming webhook URL |
    | `azure-openai-api-key` | Azure OpenAI key (conversationality + value-correctness) |
    | `state-s3-uri` | e.g. `s3://sarvam-samvaad/alerting/state.db` (dedupe state for the scan) |
-   | `scope-s3-uri` | e.g. `s3://sarvam-samvaad/alerting/scope.json` (Slack-controlled monitoring scope) |
+   | `scope-s3-uri` | e.g. `s3://sarvam-samvaad/alerting/store.json` (Slack-controlled scope + owners + expected rules) |
    | `slack-app-token` (optional) | `xapp-…` for the Socket Mode scope-control service |
    | `google-creds-json` (optional) | path/JSON for the Master-QC-sheet (gsheet) notifier |
 
-> **Scope control service** (`sarvam-alerting control-server`) is a **separate always-on
-> Deployment**, not a DAG (Socket Mode needs a long-lived pod). It writes the scope JSON that
-> the DAGs read. See `docs/scope-control.md`. Each discovering DAG pod needs
-> `SARVAM_ALERTING_SCOPE_URI` (from `scope-s3-uri`) — the scan DAG already injects it.
+> **Slack control service** (`sarvam-alerting control-server`) is a **separate always-on
+> Deployment**, not a DAG (Socket Mode needs a long-lived pod). It writes the control JSON
+> (scope + owners + expected rules) that the DAGs read. See `docs/scope-control.md`. Each
+> discovering DAG pod needs `SARVAM_ALERTING_SCOPE_URI` (from `scope-s3-uri`) — the scan DAG
+> already injects it.
 4. **Slack**: create `#automation-alerts` (reports) and `#samvaad-alerts` (alerts),
    invite the bot. Adjust channel names in `images/samvaad/config.toml` if needed.
 
@@ -61,7 +63,8 @@ git add samvaad images/samvaad && git commit -m "samvaad alerting DAGs + image" 
 
 | DAG | Schedule (UTC) | Purpose |
 |---|---|---|
-| `samvaad_alerting_scan` | `*/30 * * * *` | detectors (default-variable, connectivity, errors, short-calls, conversationality, expected-values) + run summary |
+| `samvaad_alerting_scan` | `*/30 * * * *` | detectors (default-variable, value-sanity, stalled, connectivity, errors, short-calls, conversationality, expected-values) + run summary + recovery + escalation |
+| `samvaad_alerting_heartbeat` | `15,45 * * * *` | dead-man's switch: alert if no successful scan recently |
 | `samvaad_cycle_report` | `0 14 * * *` | daily performance funnels |
 | `samvaad_conversationality_review` | `0 15 * * *` | daily LLM transcript scoring |
 | `samvaad_weekly_evals` | `0 5 * * 1` | weekly insights digest |

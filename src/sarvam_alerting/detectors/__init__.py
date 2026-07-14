@@ -11,11 +11,13 @@ from .expected_values import ExpectedValuesDetector
 from .insights_quality import InsightsQualityDetector
 from .required_populated import RequiredPopulatedDetector
 from .short_calls import ShortCallsDetector
+from .value_sanity import ValueSanityDetector
 from .variable_collapse import VariableCollapseDetector
 
 # Registry of all known detectors, keyed by their config name.
 DETECTOR_CLASSES: tuple[type[Detector], ...] = (
     VariableCollapseDetector,
+    ValueSanityDetector,
     RequiredPopulatedDetector,
     ExpectedValuesDetector,
     ConnectivityDetector,
@@ -44,6 +46,7 @@ __all__ = [
     "DETECTOR_CLASSES",
     "build_detectors",
     "VariableCollapseDetector",
+    "ValueSanityDetector",
     "RequiredPopulatedDetector",
     "ExpectedValuesDetector",
     "ConnectivityDetector",

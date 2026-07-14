@@ -20,7 +20,7 @@ baseline_hours = 72
 [discovery]
 source = "scheduling"               # cheap active-campaign lookup; avoids facts-scan 504s
 statuses = ["active", "running"]
-min_calls = 500                     # facts source only
+min_calls = 50                      # low so small campaigns are covered; detectors self-gate
 exclude = ["NO_CAMPAIGN_ID", ""]
 only = []
 # Scope which orgs/campaigns to monitor (empty = everything):
@@ -36,6 +36,28 @@ per_contact_min_distinct = 15
 per_contact_min_ratio = 0.05
 collapse_max_distinct = 1
 use_required_hints = true
+
+[detectors.value_sanity]
+enabled = true                 # placeholder / un-rendered-template / implausible values
+min_calls = 100
+min_share = 0.10
+max_distinct_per_var = 20
+use_llm = false                # opt-in LLM adjudication (uses [llm]); enable once tuned
+llm_max_vars = 15
+llm_values_per_var = 8
+
+[detectors.stalled_campaign]
+enabled = true                 # active campaign + cohort uploaded but ~no calls = dialing stalled
+min_cohort = 50
+min_calls = 5
+grace_hours = 2.0
+window_hours = 6
+lookback_hours = 24
+
+[tuning]
+shadow_mode = false            # flip true during onboarding to tune without paging Slack
+escalate_after_minutes = 30    # re-ping owners on unacknowledged criticals
+heartbeat_max_silence_hours = 2
 
 [detectors.required_populated]
 enabled = true
@@ -167,6 +189,17 @@ timeout_seconds = 60
 name = "gpt-4.1-mini"
 url = "https://azure-openai-deployment-agents.openai.azure.com/openai/deployments/gpt-4.1-mini/chat/completions?api-version=2025-01-01-preview"
 api_key_env = "AZURE_OPENAI_API_KEY"
+
+# ---- Engagement-owner tagging: @-mention the right person on critical alerts ----
+# Matching by substring: campaign first, then org, then `default`. Use Slack user ids
+# ("U…") or user-group ids ("S…"); plain @names don't notify. Fill in real ids per client.
+[owners]
+min_severity = "critical"
+# default = ["U0000DEFAULT"]
+# [owners.org]
+# "chola.com" = ["U0AAAA1111"]
+# [owners.campaign]
+# "PAPQ" = ["U0CCCC3333"]
 
 # ---- Notifiers ----
 # console -> Airflow task logs (great for debugging). slack_bot -> real delivery.

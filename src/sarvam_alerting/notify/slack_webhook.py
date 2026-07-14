@@ -7,6 +7,7 @@ import os
 import httpx
 
 from ..models import Finding, Report, Severity
+from ..owners import OwnerResolver
 from .base import Notifier
 from .slack_format import build_blocks, build_report_blocks
 
@@ -18,8 +19,9 @@ class SlackWebhookNotifier(Notifier):
         options: dict,
         streams: tuple[str, ...] = ("alerts",),
         links: dict | None = None,
+        owners: OwnerResolver | None = None,
     ):
-        super().__init__(min_severity, streams, links)
+        super().__init__(min_severity, streams, links, owners)
         url_env = options.get("url_env", "SLACK_WEBHOOK_URL")
         self._url = os.environ.get(url_env, "").strip()
         if not self._url:
@@ -34,7 +36,19 @@ class SlackWebhookNotifier(Notifier):
     def _emit(self, findings: list[Finding], meta: dict) -> None:
         if not findings:
             return  # webhook stays quiet on clean runs
-        self._post(*build_blocks(findings, meta, self.links))
+        self._post(*build_blocks(findings, meta, self.links, self.owners))
 
     def _emit_report(self, report: Report) -> None:
         self._post(*build_report_blocks(report))
+
+    def _emit_recovery(self, recoveries: list[dict]) -> None:
+        lines = [f":white_check_mark: `{r['campaign_id']}` — {r['title']} has cleared."
+                 for r in recoveries]
+        text = "*Recovered*\n" + "\n".join(lines)
+        self._post(text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}])
+
+    def _emit_escalation(self, items: list[dict]) -> None:
+        lines = [f":arrow_up: `{r['campaign_id']}` — *{r['title']}* still unresolved."
+                 for r in items]
+        text = ":rotating_light: *Escalation — unacknowledged criticals*\n" + "\n".join(lines)
+        self._post(text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}])

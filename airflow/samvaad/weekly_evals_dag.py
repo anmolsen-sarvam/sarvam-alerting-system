@@ -61,7 +61,7 @@ def samvaad_weekly_evals():
         with MetabaseClient(cfg.metabase) as mb:
             report = build_weekly_evals(mb, cfg)
         if report:
-            for notifier in build_notifiers(cfg.notifiers):
+            for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
                 if notifier.wants("reports"):
                     notifier.deliver_report(report)
         print(f"weekly evals: report={'yes' if report else 'none'}")

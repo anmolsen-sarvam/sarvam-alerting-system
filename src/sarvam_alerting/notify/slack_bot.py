@@ -11,8 +11,9 @@ import os
 import httpx
 
 from ..models import Finding, Report, Severity
+from ..owners import OwnerResolver
 from .base import Notifier, group_by_campaign
-from .slack_format import build_blocks, build_report_blocks
+from .slack_format import alert_action_blocks, build_campaign_blocks, build_report_blocks
 
 _API = "https://slack.com/api/chat.postMessage"
 
@@ -24,8 +25,9 @@ class SlackBotNotifier(Notifier):
         options: dict,
         streams: tuple[str, ...] = ("alerts",),
         links: dict | None = None,
+        owners: OwnerResolver | None = None,
     ):
-        super().__init__(min_severity, streams, links)
+        super().__init__(min_severity, streams, links, owners)
         token_env = options.get("token_env", "SLACK_BOT_TOKEN")
         self._token = os.environ.get(token_env, "").strip()
         if not self._token:
@@ -69,19 +71,40 @@ class SlackBotNotifier(Notifier):
     def _emit(self, findings: list[Finding], meta: dict) -> None:
         if not findings:
             return
-        # One parent message per campaign; findings posted as threaded replies so a
-        # campaign's alerts stay grouped instead of flooding the channel.
+        # One tidy message per campaign: heading · findings · evidence · owner · buttons.
         for campaign_id, items in group_by_campaign(findings).items():
             org_id = items[0].org_id if items else ""
             channel = self._channel_for(campaign_id, org_id)
-            worst = max(items, key=lambda f: f.severity.rank)
-            parent_text = (
-                f"{worst.severity.emoji} {len(items)} alert(s) on campaign "
-                f"`{campaign_id}`" + (f" · {org_id}" if org_id else "")
-            )
-            thread_ts = self._post(channel, parent_text)
-            fallback, blocks = build_blocks(items, meta, self.links)
-            self._post(channel, fallback, blocks, thread_ts=thread_ts)
+            fallback, blocks = build_campaign_blocks(campaign_id, items, self.links, self.owners)
+            blocks.append(alert_action_blocks(campaign_id, org_id, self.links))
+            self._post(channel, fallback, blocks)
 
     def _emit_report(self, report: Report) -> None:
         self._post(self._report_channel, *build_report_blocks(report))
+
+    def _emit_recovery(self, recoveries: list[dict]) -> None:
+        lines = [f":white_check_mark: `{r['campaign_id']}` — {r['title']} has cleared."
+                 for r in recoveries]
+        text = "*Recovered*\n" + "\n".join(lines)
+        self._post(self._default_channel, text,
+                   [{"type": "section", "text": {"type": "mrkdwn", "text": text}}])
+
+    def _emit_escalation(self, items: list[dict]) -> None:
+        by_campaign: dict[str, list[dict]] = {}
+        for it in items:
+            by_campaign.setdefault(it["campaign_id"], []).append(it)
+        for campaign_id, its in by_campaign.items():
+            org_id = its[0].get("org_id", "")
+            channel = self._channel_for(campaign_id, org_id)
+            titles = "\n".join(f"• *{i['title']}*" for i in its)
+            text = (
+                f":arrow_up: :rotating_light: *Still unresolved* on `{campaign_id}`"
+                + (f" · `{org_id}`" if org_id else "")
+                + f"\n{titles}\n_No one has acknowledged this — please take a look._"
+            )
+            # Re-ping owners regardless of the min-severity gate (this is already critical).
+            if self.owners is not None:
+                mentions = self.owners.mentions_for(org_id, campaign_id, Severity.CRITICAL.rank)
+                if mentions:
+                    text += "\n" + " ".join(mentions)
+            self._post(channel, text, [{"type": "section", "text": {"type": "mrkdwn", "text": text}}])

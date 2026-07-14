@@ -82,23 +82,55 @@ def samvaad_alerting_scan():
             findings, campaigns = run_scan(mb, cfg)
             reports = build_reports(mb, cfg, campaigns)
 
+        import time as _time
+
+        from sarvam_alerting.notify.console import ConsoleNotifier
+        from sarvam_alerting.scope import is_muted
+
         state = StateStore(cfg.state.path, cfg.state.cooldown_hours)
         new = [f for f in findings if state.is_new(f)]
+
+        # Recovery: findings open last run but absent now (and not muted) have cleared.
+        current_fps = {f.fingerprint for f in findings}
+        now = _time.time()
+        resolved = [
+            a for a in state.active_findings(now)
+            if a["fingerprint"] not in current_fps
+            and not is_muted(a["campaign_id"], cfg.mutes, now)
+        ]
+        # Escalation: still-open criticals nobody acknowledged (muted = acknowledged).
+        escalate_after = int(cfg.tuning.get("escalate_after_minutes", 30)) * 60
+        escalations = [
+            e for e in state.escalation_candidates(escalate_after, now)
+            if e["fingerprint"] in current_fps
+            and not is_muted(e["campaign_id"], cfg.mutes, now)
+        ]
+
+        shadow = bool(cfg.tuning.get("shadow_mode", False))
         meta = {"campaigns_scanned": len(campaigns)}
-        for notifier in build_notifiers(cfg.notifiers):
-            if notifier.wants("alerts"):
+        for notifier in build_notifiers(cfg.notifiers, cfg.links, cfg.owners):
+            # In shadow mode only the console (task logs) sees alerts; digests still post.
+            if notifier.wants("alerts") and not (shadow and not isinstance(notifier, ConsoleNotifier)):
                 notifier.notify(new, meta)
+                notifier.notify_recovery(resolved)
+                notifier.notify_escalation(escalations)
             if notifier.wants("reports"):
                 for report in reports:
                     notifier.deliver_report(report)
         for f in new:
             state.mark_notified(f)
+        for a in resolved:
+            state.clear(a["fingerprint"])
+        for e in escalations:
+            state.mark_escalated(e["fingerprint"])
+        state.beat(now)  # heartbeat for the dead-man's switch
         state.close()
 
         if state_s3:
             _s3_upload(str(cfg.state.path), state_s3)
 
-        print(f"scan: {len(findings)} findings, {len(new)} new, {len(campaigns)} campaigns")
+        print(f"scan: {len(findings)} findings, {len(new)} new, {len(campaigns)} campaigns, "
+              f"{len(escalations)} escalation(s)")
         return {"findings": len(findings), "new": len(new), "campaigns": len(campaigns)}
 
     scan()

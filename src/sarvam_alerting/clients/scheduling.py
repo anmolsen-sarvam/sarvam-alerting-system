@@ -120,31 +120,41 @@ def required_variables(
     mb: MetabaseClient, app_id: str, app_version: int | None
 ) -> dict[str, dict]:
     """Return {variable: {"required": bool, "fallback": str|None}} for an app's
-    most-recent cohort transformation. Empty dict if none found."""
+    cohort transformation. Empty dict if none found.
+
+    Note: the facts table's ``app_version`` and the ``cohort_transformations``
+    version are on *different* numbering, so a version-pinned lookup often misses.
+    We try the pinned version first (most precise), then fall back to the latest
+    transformation for the app regardless of version.
+    """
     if not app_id:
         return {}
     ct = mb.scheduling_table("cohort_transformations")
-    version_clause = (
-        f"AND app_version = {int(app_version)}" if app_version is not None else ""
-    )
-    sql = f"""
-    WITH latest AS (
-        SELECT transformation_config
-        FROM {ct}
-        WHERE app_id = {sql_str(app_id)} {version_clause}
-        ORDER BY created_at DESC
-        LIMIT 1
-    )
-    SELECT kv.key                              AS variable,
-           (kv.value->>'required')::boolean    AS required,
-           kv.value->>'fallback_value'         AS fallback
-    FROM latest,
-         jsonb_each(latest.transformation_config::jsonb->'agent_variables') kv
-    """
-    try:
-        rows = mb.query(sql, database_id=mb.scheduling_db)
-    except Exception:
-        return {}
+
+    def _query(version: int | None) -> list[dict]:
+        version_clause = f"AND app_version = {int(version)}" if version is not None else ""
+        sql = f"""
+        WITH latest AS (
+            SELECT transformation_config
+            FROM {ct}
+            WHERE app_id = {sql_str(app_id)} {version_clause}
+            ORDER BY created_at DESC
+            LIMIT 1
+        )
+        SELECT kv.key                              AS variable,
+               (kv.value->>'required')::boolean    AS required,
+               kv.value->>'fallback_value'         AS fallback
+        FROM latest,
+             jsonb_each(latest.transformation_config::jsonb->'agent_variables') kv
+        """
+        try:
+            return mb.query(sql, database_id=mb.scheduling_db)
+        except Exception:
+            return []
+
+    rows = _query(app_version) if app_version is not None else []
+    if not rows:
+        rows = _query(None)  # fall back to the app's most-recent transformation
     return {
         str(r["variable"]): {
             "required": bool(r.get("required")),

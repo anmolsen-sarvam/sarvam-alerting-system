@@ -68,15 +68,18 @@ clients/
   llm.py        Azure OpenAI chat; JSON mode; auto-adapts max_tokens↔max_completion_tokens
                 (gpt-5) and drops temperature when rejected; optional fallback model
   samvaad.py    stub (token is Chrome-bound; unused)
-detectors/    base.Detector (ABC) + DetectorContext; 8 detectors; DETECTOR_CLASSES registry
+detectors/    base.Detector (ABC) + DetectorContext; 10 detectors; DETECTOR_CLASSES registry
+              + stalled.py (scan-level stalled/zero-dial check, not a per-campaign Detector)
 reports/      run_summary, cycle_report, weekly_evals, client_report,
               conversationality_review + value_correctness (LLM, encryption-guarded)
-notify/       base.Notifier (min_severity + streams {alerts,reports} + links);
+notify/       base.Notifier (min_severity + streams {alerts,reports} + links + owners);
               console, slack_webhook, slack_bot (threads/routing), gsheet; slack_format
+owners.py     OwnerResolver: org/campaign substring -> Slack mentions, severity-gated
 state.py      SQLite dedupe: is_new(finding, cooldown) / mark_notified()
 engine.py     discover_campaigns, run_campaign, run_scan, build_reports
 cli.py        typer app: check / watch / run-summary / cycle-report / weekly-evals /
-              conversationality-review / value-correctness / client-report / test-notify
+              conversationality-review / value-correctness / client-report / test-notify /
+              owners {list,add,remove,min} / control-server
 deeplinks.py  builds Metabase/call links from config templates
 ```
 
